@@ -68,10 +68,10 @@ function formatGPU(gpu: GPUData): string {
 function compactGPU(gpu: GPUData): string {
   const temp = gpu["temperature.gpu"] != null ? `${gpu["temperature.gpu"]}°C` : "--";
   const util = gpu["utilization.gpu"] != null ? `GPU:${gpu["utilization.gpu"]}%` : "GPU:--";
-  let vram = "VRAM:--";
+  let vram = "--";
   if (gpu["memory.used"] != null && gpu["memory.total"] != null && gpu["memory.total"] > 0) {
     const pct = ((gpu["memory.used"] / gpu["memory.total"]) * 100).toFixed(0);
-    vram = `VRAM:${pct}%`;
+    vram = `${pct}%`;
   }
   return `${temp} ${util} ${vram}`;
 }
@@ -79,6 +79,7 @@ function compactGPU(gpu: GPUData): string {
 export default function (pi: ExtensionAPI) {
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
   const REFRESH_MS = 3000;
+  let widgetVisible = true;
 
   // ── Start / stop periodic refresh ────────────────────────────────
 
@@ -101,25 +102,39 @@ export default function (pi: ExtensionAPI) {
     const gpus = await fetchGPUs();
     if (gpus.length === 0) return;
 
-    const widgetLines: string[] = [];
-    for (const gpu of gpus) {
-      if (gpu.error) {
-        widgetLines.push(`  Error: ${gpu.error}`);
-      } else {
-        widgetLines.push(`  ${formatGPU(gpu)}`);
+    // Group by metric: Temp, GPU util, VRAM util
+    const temps = gpus.map(g => g["temperature.gpu"] != null ? `${g["temperature.gpu"]}°C` : "--");
+    const utils = gpus.map(g => g["utilization.gpu"] != null ? `${g["utilization.gpu"]}%` : "--");
+    const vrams = gpus.map(g => {
+      if (g["memory.used"] != null && g["memory.total"] != null && g["memory.total"] > 0) {
+        return `${((g["memory.used"] / g["memory.total"]) * 100).toFixed(0)}%`;
       }
-    }
-
-    const statusParts = gpus.map(compactGPU);
-    const statusText = statusParts.join("  ●  ");
+      return "--";
+    });
+    const statusText = `Temp: ${temps.join("/")}  GPU: ${utils.join("/")}  VRAM: ${vrams.join("/")}`;
 
     if (ctx.mode === "tui") {
-      ctx.ui.setWidget("gpu-status", widgetLines, { placement: "aboveEditor" });
+      // Always show footer
       ctx.ui.setStatus("gpu-status", statusText);
+
+      // Widget respects toggle state
+      if (widgetVisible) {
+        const widgetLines: string[] = [];
+        for (const gpu of gpus) {
+          if (gpu.error) {
+            widgetLines.push(`  Error: ${gpu.error}`);
+          } else {
+            widgetLines.push(`  ${formatGPU(gpu)}`);
+          }
+        }
+        ctx.ui.setWidget("gpu-status", widgetLines, { placement: "aboveEditor" });
+      } else {
+        ctx.ui.setWidget("gpu-status", undefined);
+      }
     }
   }
 
-  // ── Always visible, refreshing in background ────────────────────
+  // ── Lifecycle ────────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.mode === "tui") {
@@ -131,29 +146,18 @@ export default function (pi: ExtensionAPI) {
     stopRefresh();
   });
 
-  // ── /gpu-status command ──────────────────────────────────────────
+  // ── /gpu-toggle command ──────────────────────────────────────────
 
-  pi.registerCommand("gpu-status", {
-    description: "Show current NVIDIA GPU status",
+  pi.registerCommand("gpu-toggle", {
+    description: "Toggle GPU widget visibility (on/off)",
     handler: async (_args, ctx) => {
-      const gpus = await fetchGPUs();
-
-      if (gpus.length === 0) {
-        ctx.ui.notify("GPU dashboard unreachable or no GPUs found", "warning");
-        return;
+      widgetVisible = !widgetVisible;
+      if (widgetVisible) {
+        ctx.ui.notify("GPU widget enabled", "info");
+      } else {
+        ctx.ui.setWidget("gpu-status", undefined);
+        ctx.ui.notify("GPU widget disabled", "info");
       }
-
-      const lines: string[] = [];
-      for (const gpu of gpus) {
-        if (gpu.error) {
-          lines.push(`  Error: ${gpu.error}`);
-        } else {
-          lines.push(`  ${formatGPU(gpu)}`);
-        }
-      }
-
-      ctx.ui.setWidget("gpu-status", lines, { placement: "aboveEditor" });
-      ctx.ui.notify("GPU status updated", "info");
     },
   });
 
