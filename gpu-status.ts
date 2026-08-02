@@ -14,8 +14,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const DASHBOARD_URL = "http://localhost:8181";
-
 interface GPUData {
   index: number | null;
   name: string | null;
@@ -32,9 +30,12 @@ interface GPUData {
   error?: string;
 }
 
+const DASHBOARD_URL = process.env.PI_GPU_DASHBOARD_URL ?? "http://localhost:8181";
+
 async function fetchGPUs(): Promise<GPUData[]> {
   try {
-    const resp = await fetch(`${DASHBOARD_URL}/api/gpu`, { signal: AbortSignal.timeout(5000) });
+    // ?sid=gpu-ext registers us as a viewer so the dashboard keeps refreshing
+    const resp = await fetch(`${DASHBOARD_URL}/api/gpu?sid=gpu-ext`, { signal: AbortSignal.timeout(5000) });
     if (!resp.ok) return [];
     return (await resp.json()) as GPUData[];
   } catch {
@@ -80,6 +81,7 @@ export default function (pi: ExtensionAPI) {
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
   const REFRESH_MS = 3000;
   let widgetVisible = true;
+  let firstAgentRunDone = false;
 
   // ── Start / stop periodic refresh ────────────────────────────────
 
@@ -144,6 +146,13 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     stopRefresh();
+  });
+
+  pi.on("agent_start", async () => {
+    if (!firstAgentRunDone) {
+      firstAgentRunDone = true;
+      widgetVisible = false;
+    }
   });
 
   // ── /gpu-toggle command ──────────────────────────────────────────
