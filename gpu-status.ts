@@ -30,7 +30,7 @@ interface GPUData {
   error?: string;
 }
 
-const DASHBOARD_URL = process.env.PI_GPU_DASHBOARD_URL ?? "http://localhost:8181";
+const DASHBOARD_URL = process.env.PI_GPU_DASHBOARD_URL ?? "http://192.168.1.10:8181";
 
 async function fetchGPUs(): Promise<GPUData[]> {
   try {
@@ -101,38 +101,43 @@ export default function (pi: ExtensionAPI) {
   // ── Fetch and render ─────────────────────────────────────────────
 
   async function refreshGPUs(ctx: Parameters<NonNullable<Parameters<typeof pi.on>[1]>>[1]) {
-    const gpus = await fetchGPUs();
-    if (gpus.length === 0) return;
+    try {
+      const gpus = await fetchGPUs();
+      if (gpus.length === 0) return;
 
-    // Group by metric: Temp, GPU util, VRAM util
-    const temps = gpus.map(g => g["temperature.gpu"] != null ? `${g["temperature.gpu"]}°C` : "--");
-    const utils = gpus.map(g => g["utilization.gpu"] != null ? `${g["utilization.gpu"]}%` : "--");
-    const vrams = gpus.map(g => {
-      if (g["memory.used"] != null && g["memory.total"] != null && g["memory.total"] > 0) {
-        return `${((g["memory.used"] / g["memory.total"]) * 100).toFixed(0)}%`;
-      }
-      return "--";
-    });
-    const statusText = `Temp: ${temps.join("/")}  GPU: ${utils.join("/")}  VRAM: ${vrams.join("/")}`;
-
-    if (ctx.mode === "tui") {
-      // Always show footer
-      ctx.ui.setStatus("gpu-status", statusText);
-
-      // Widget respects toggle state
-      if (widgetVisible) {
-        const widgetLines: string[] = [];
-        for (const gpu of gpus) {
-          if (gpu.error) {
-            widgetLines.push(`  Error: ${gpu.error}`);
-          } else {
-            widgetLines.push(`  ${formatGPU(gpu)}`);
-          }
+      // Group by metric: Temp, GPU util, VRAM util
+      const temps = gpus.map(g => g["temperature.gpu"] != null ? `${g["temperature.gpu"]}°C` : "--");
+      const utils = gpus.map(g => g["utilization.gpu"] != null ? `${g["utilization.gpu"]}%` : "--");
+      const vrams = gpus.map(g => {
+        if (g["memory.used"] != null && g["memory.total"] != null && g["memory.total"] > 0) {
+          return `${((g["memory.used"] / g["memory.total"]) * 100).toFixed(0)}%`;
         }
-        ctx.ui.setWidget("gpu-status", widgetLines, { placement: "aboveEditor" });
-      } else {
-        ctx.ui.setWidget("gpu-status", undefined);
+        return "--";
+      });
+      const statusText = `Temp: ${temps.join("/")}  GPU: ${utils.join("/")}  VRAM: ${vrams.join("/")}`;
+
+      if (ctx.mode === "tui") {
+        // Always show footer
+        ctx.ui.setStatus("gpu-status", statusText);
+
+        // Widget respects toggle state
+        if (widgetVisible) {
+          const widgetLines: string[] = [];
+          for (const gpu of gpus) {
+            if (gpu.error) {
+              widgetLines.push(`  Error: ${gpu.error}`);
+            } else {
+              widgetLines.push(`  ${formatGPU(gpu)}`);
+            }
+          }
+          ctx.ui.setWidget("gpu-status", widgetLines, { placement: "aboveEditor" });
+        } else {
+          ctx.ui.setWidget("gpu-status", undefined);
+        }
       }
+    } catch (err) {
+      // Silently swallow errors from stale context or UI failures
+      // to prevent crashing pi. The next interval will retry.
     }
   }
 
