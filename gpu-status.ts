@@ -1,13 +1,12 @@
 /**
  * GPU Status Extension
  *
- * Shows NVIDIA GPU card details in the pi TUI during inference.
- * Fetches data from the local GPU dashboard API (http://localhost:8181).
+ * Shows NVIDIA GPU stats in the footer only (no widget above editor).
+ * Fetches data from the local GPU dashboard API.
  *
  * Features:
- * - Widget above editor showing GPU stats during agent runs
- * - Footer status line with compact GPU summary
- * - /gpu-status command for on-demand checks
+ * - Compact footer summary by default
+ * - /gpu-toggle switches to detailed per-GPU footer view
  * - gpu_status tool callable by the LLM
  */
 
@@ -34,7 +33,6 @@ const DASHBOARD_URL = process.env.PI_GPU_DASHBOARD_URL ?? "http://192.168.1.10:8
 
 async function fetchGPUs(): Promise<GPUData[]> {
   try {
-    // ?sid=gpu-ext registers us as a viewer so the dashboard keeps refreshing
     const resp = await fetch(`${DASHBOARD_URL}/api/gpu?sid=gpu-ext`, { signal: AbortSignal.timeout(5000) });
     if (!resp.ok) return [];
     return (await resp.json()) as GPUData[];
@@ -48,11 +46,18 @@ function makeBar(percent: number, width: number = 10): string {
   return "█".repeat(filled) + "░".repeat(width - filled);
 }
 
+function compactGPUName(name: string | null): string {
+  if (!name) return "?";
+  // Extract model number (e.g. "RTX 3090" -> "3090", "GeForce RTX 4070 Ti" -> "4070")
+  const match = name.match(/\d{4}/);
+  return match ? match[0] : name;
+}
+
 function formatGPU(gpu: GPUData): string {
-  const name = gpu.name ?? "Unknown";
+  const name = compactGPUName(gpu.name);
   const temp = gpu["temperature.gpu"] != null ? `${gpu["temperature.gpu"]}°C` : "--";
   const util = gpu["utilization.gpu"] != null ? `${gpu["utilization.gpu"]}%` : "--";
-  const power = gpu["power.draw"] != null ? `${gpu["power.draw"]}W` : "--";
+  const power = gpu["power.draw"] != null ? `${Math.round(gpu["power.draw"])}W` : "--";
   const fan = gpu["fan.speed"] != null ? `${gpu["fan.speed"]}%` : "--";
 
   let vram = "--";
@@ -63,29 +68,17 @@ function formatGPU(gpu: GPUData): string {
     vram = `${used}/${total} ${makeBar(Number(pct))} ${pct}%`;
   }
 
-  return `${name} | ${temp} | GPU:${util} | ${vram} | ${power} | Fan:${fan}`;
-}
-
-function compactGPU(gpu: GPUData): string {
-  const temp = gpu["temperature.gpu"] != null ? `${gpu["temperature.gpu"]}°C` : "--";
-  const util = gpu["utilization.gpu"] != null ? `GPU:${gpu["utilization.gpu"]}%` : "GPU:--";
-  let vram = "--";
-  if (gpu["memory.used"] != null && gpu["memory.total"] != null && gpu["memory.total"] > 0) {
-    const pct = ((gpu["memory.used"] / gpu["memory.total"]) * 100).toFixed(0);
-    vram = `${pct}%`;
-  }
-  return `${temp} ${util} ${vram}`;
+  return `${name} ${temp} ${util} ${vram} ${power} Fan:${fan}`;
 }
 
 export default function (pi: ExtensionAPI) {
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
   const REFRESH_MS = 3000;
-  let widgetVisible = true;
-  let firstAgentRunDone = false;
+  let detailedFooter = false; // compact by default, toggle to detailed
 
-  // ── Start / stop periodic refresh ────────────────────────────────
+  type Ctx = Parameters<NonNullable<Parameters<typeof pi.on>[1]>>[1];
 
-  function startRefresh(ctx: Parameters<NonNullable<Parameters<typeof pi.on>[1]>>[1]) {
+  function startRefresh(ctx: Ctx) {
     if (refreshTimer) return;
     refreshGPUs(ctx);
     refreshTimer = setInterval(() => refreshGPUs(ctx), REFRESH_MS);
@@ -98,46 +91,40 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // ── Fetch and render ─────────────────────────────────────────────
-
-  async function refreshGPUs(ctx: Parameters<NonNullable<Parameters<typeof pi.on>[1]>>[1]) {
+  async function refreshGPUs(ctx: Ctx) {
     try {
       const gpus = await fetchGPUs();
-      if (gpus.length === 0) return;
+      if (gpus.length === 0 || ctx.mode !== "tui") return;
 
-      // Group by metric: Temp, GPU util, VRAM util
-      const temps = gpus.map(g => g["temperature.gpu"] != null ? `${g["temperature.gpu"]}°C` : "--");
-      const utils = gpus.map(g => g["utilization.gpu"] != null ? `${g["utilization.gpu"]}%` : "--");
-      const vrams = gpus.map(g => {
-        if (g["memory.used"] != null && g["memory.total"] != null && g["memory.total"] > 0) {
-          return `${((g["memory.used"] / g["memory.total"]) * 100).toFixed(0)}%`;
-        }
-        return "--";
-      });
-      const statusText = `Temp: ${temps.join("/")}  GPU: ${utils.join("/")}  VRAM: ${vrams.join("/")}`;
-
-      if (ctx.mode === "tui") {
-        // Always show footer
-        ctx.ui.setStatus("gpu-status", statusText);
-
-        // Widget respects toggle state
-        if (widgetVisible) {
-          const widgetLines: string[] = [];
-          for (const gpu of gpus) {
-            if (gpu.error) {
-              widgetLines.push(`  Error: ${gpu.error}`);
-            } else {
-              widgetLines.push(`  ${formatGPU(gpu)}`);
-            }
+      if (detailedFooter) {
+        // Detailed: full per-GPU info in the footer
+        const lines: string[] = [];
+        for (const gpu of gpus) {
+          if (gpu.error) {
+            lines.push(`Error: ${gpu.error}`);
+          } else {
+            lines.push(formatGPU(gpu));
           }
-          ctx.ui.setWidget("gpu-status", widgetLines, { placement: "aboveEditor" });
-        } else {
-          ctx.ui.setWidget("gpu-status", undefined);
         }
+        ctx.ui.setStatus("gpu-status", lines.join(" ◆ "));
+      } else {
+        // Compact: single-line summary
+        const temps = gpus.map(
+          (g) => g["temperature.gpu"] != null ? `${g["temperature.gpu"]}°C` : "--",
+        );
+        const utils = gpus.map(
+          (g) => g["utilization.gpu"] != null ? `${g["utilization.gpu"]}%` : "--",
+        );
+        const vrams = gpus.map((g) => {
+          if (g["memory.used"] != null && g["memory.total"] != null && g["memory.total"] > 0) {
+            return `${((g["memory.used"] / g["memory.total"]) * 100).toFixed(0)}%`;
+          }
+          return "--";
+        });
+        ctx.ui.setStatus("gpu-status", `Temp: ${temps.join("/")}  GPU: ${utils.join("/")}  VRAM: ${vrams.join("/")}`);
       }
-    } catch (err) {
-      // Silently swallow errors from stale context or UI failures
-      // to prevent crashing pi. The next interval will retry.
+    } catch {
+      // Silently swallow errors from stale context or UI failures.
     }
   }
 
@@ -153,25 +140,14 @@ export default function (pi: ExtensionAPI) {
     stopRefresh();
   });
 
-  pi.on("agent_start", async () => {
-    if (!firstAgentRunDone) {
-      firstAgentRunDone = true;
-      widgetVisible = false;
-    }
-  });
-
   // ── /gpu-toggle command ──────────────────────────────────────────
 
   pi.registerCommand("gpu-toggle", {
-    description: "Toggle GPU widget visibility (on/off)",
+    description: "Toggle GPU footer between compact and detailed view",
     handler: async (_args, ctx) => {
-      widgetVisible = !widgetVisible;
-      if (widgetVisible) {
-        ctx.ui.notify("GPU widget enabled", "info");
-      } else {
-        ctx.ui.setWidget("gpu-status", undefined);
-        ctx.ui.notify("GPU widget disabled", "info");
-      }
+      detailedFooter = !detailedFooter;
+      ctx.ui.notify(detailedFooter ? "GPU detailed" : "GPU compact", "info");
+      refreshGPUs(ctx);
     },
   });
 
