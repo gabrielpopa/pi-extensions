@@ -85,7 +85,7 @@ export default function (pi: ExtensionAPI) {
     pi.on("session_start", async (_event, ctx) => {
         ctx.ui.setStatus(
             "idle-guard",
-            ctx.ui.theme.fg("dim", `Idle guard: on (prefill ${prefillThresholdMs / 1000}s / stream ${streamThresholdMs / 1000}s)`)
+            ctx.ui.theme.fg("dim", `Idle guard: on`)
         );
     });
 
@@ -164,7 +164,7 @@ export default function (pi: ExtensionAPI) {
 
             ctx.ui.setStatus(
                 "idle-guard",
-                ctx.ui.theme.fg("dim", `Idle guard: ${enabled ? "on" : "off"} (p:${prefillThresholdMs / 1000}s/s:${streamThresholdMs / 1000}s)`)
+                ctx.ui.theme.fg("dim", `Idle guard: ${enabled ? "on" : "off"}`)
             );
             ctx.ui.notify(
                 `Idle guard: ${enabled ? "ON" : "OFF"} (prefill: ${prefillThresholdMs / 1000}s, stream: ${streamThresholdMs / 1000}s)`,

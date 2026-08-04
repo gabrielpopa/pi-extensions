@@ -10,7 +10,7 @@
  * - gpu_status tool callable by the LLM
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 interface GPUData {
@@ -53,10 +53,16 @@ function compactGPUName(name: string | null): string {
   return match ? match[0] : name;
 }
 
-function formatGPU(gpu: GPUData): string {
+function colorUtil(utilPct: number | null, theme?: ExtensionContext["ui"]["theme"]): string {
+  if (utilPct == null) return "--";
+  const str = `${utilPct}%`;
+  return utilPct > 0 && theme ? theme.fg("success", str) : str;
+}
+
+function formatGPU(gpu: GPUData, theme?: ExtensionContext["ui"]["theme"]): string {
   const name = compactGPUName(gpu.name);
   const temp = gpu["temperature.gpu"] != null ? `${gpu["temperature.gpu"]}°C` : "--";
-  const util = gpu["utilization.gpu"] != null ? `${gpu["utilization.gpu"]}%` : "--";
+  const util = colorUtil(gpu["utilization.gpu"], theme);
   const power = gpu["power.draw"] != null ? `${Math.round(gpu["power.draw"])}W` : "--";
   const fan = gpu["fan.speed"] != null ? `${gpu["fan.speed"]}%` : "--";
 
@@ -76,9 +82,7 @@ export default function (pi: ExtensionAPI) {
   const REFRESH_MS = 3000;
   let detailedFooter = false; // compact by default, toggle to detailed
 
-  type Ctx = Parameters<NonNullable<Parameters<typeof pi.on>[1]>>[1];
-
-  function startRefresh(ctx: Ctx) {
+  function startRefresh(ctx: ExtensionContext) {
     if (refreshTimer) return;
     refreshGPUs(ctx);
     refreshTimer = setInterval(() => refreshGPUs(ctx), REFRESH_MS);
@@ -91,7 +95,7 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  async function refreshGPUs(ctx: Ctx) {
+  async function refreshGPUs(ctx: ExtensionContext) {
     try {
       const gpus = await fetchGPUs();
       if (gpus.length === 0 || ctx.mode !== "tui") return;
@@ -103,7 +107,7 @@ export default function (pi: ExtensionAPI) {
           if (gpu.error) {
             lines.push(`Error: ${gpu.error}`);
           } else {
-            lines.push(formatGPU(gpu));
+            lines.push(formatGPU(gpu, ctx.ui.theme));
           }
         }
         ctx.ui.setStatus("gpu-status", lines.join(" ◆ "));
@@ -112,9 +116,7 @@ export default function (pi: ExtensionAPI) {
         const temps = gpus.map(
           (g) => g["temperature.gpu"] != null ? `${g["temperature.gpu"]}°C` : "--",
         );
-        const utils = gpus.map(
-          (g) => g["utilization.gpu"] != null ? `${g["utilization.gpu"]}%` : "--",
-        );
+        const utils = gpus.map((g) => colorUtil(g["utilization.gpu"], ctx.ui.theme));
         const vrams = gpus.map((g) => {
           if (g["memory.used"] != null && g["memory.total"] != null && g["memory.total"] > 0) {
             return `${((g["memory.used"] / g["memory.total"]) * 100).toFixed(0)}%`;
