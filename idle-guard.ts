@@ -19,7 +19,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-const DEFAULT_PREFILL_THRESHOLD_MS = 180_000; // 3 minutes for initial context processing
+const DEFAULT_PREFILL_THRESHOLD_MS = 120_000; // 2 minutes for initial context processing
 const DEFAULT_STREAM_THRESHOLD_MS = 45_000;   // 45 seconds once tokens are flowing
 const MIN_PREFILL_SEC = 30;
 const MAX_PREFILL_SEC = 600;
@@ -38,6 +38,10 @@ export default function (pi: ExtensionAPI) {
     let turnActive = false;
     let firstTokenReceived = false;
     let currentCtx: ExtensionContext | null = null;
+    let retryCount = 0;
+    let originalPrompt: string | null = null;
+    let isRetrySend = false;
+    const MAX_RETRIES = 3;
 
     function stopMonitoring() {
         if (timerId) {
@@ -54,6 +58,11 @@ export default function (pi: ExtensionAPI) {
         turnStartTime = Date.now();
         turnActive = true;
         firstTokenReceived = false;
+        // Only reset retry count for genuine new prompts, not our own retries
+        if (!isRetrySend) {
+            retryCount = 0;
+        }
+        isRetrySend = false;
 
         timerId = setInterval(() => {
             if (!turnActive) return;
@@ -68,16 +77,35 @@ export default function (pi: ExtensionAPI) {
                 timerId = null;
 
                 const silenceSeconds = (silenceMs / 1000).toFixed(0);
-                console.error(`[idle-guard] Stream idle for ${silenceSeconds}s (${phase}) — aborting`);
 
-                try {
-                    ctx.ui.notify(
-                        `Stream hung (${silenceSeconds}s idle, ${phase}), aborting`,
-                        "warning"
-                    );
-                } catch {}
+                if (retryCount < MAX_RETRIES && originalPrompt) {
+                    retryCount++;
+                    console.error(`[idle-guard] Stream idle for ${silenceSeconds}s (${phase}) — retry ${retryCount}/${MAX_RETRIES}`);
 
-                ctx.abort();
+                    try {
+                        ctx.ui.notify(
+                            `Stream hung (${silenceSeconds}s idle, ${phase}), retrying (${retryCount}/${MAX_RETRIES})`,
+                            "warning"
+                        );
+                    } catch {}
+
+                    ctx.abort();
+                    isRetrySend = true;
+                    setTimeout(() => {
+                        pi.sendUserMessage(originalPrompt!);
+                    }, 500);
+                } else {
+                    console.error(`[idle-guard] Stream idle for ${silenceSeconds}s (${phase}) — aborting after ${retryCount} retries`);
+
+                    try {
+                        ctx.ui.notify(
+                            `Stream hung (${silenceSeconds}s idle, ${phase}), aborting after ${retryCount} retries`,
+                            "warning"
+                        );
+                    } catch {}
+
+                    ctx.abort();
+                }
             }
         }, 2_000);
     }
@@ -87,6 +115,11 @@ export default function (pi: ExtensionAPI) {
             "idle-guard",
             ctx.ui.theme.fg("dim", `Idle guard: on`)
         );
+    });
+
+    pi.on("before_agent_start", async (event, _ctx) => {
+        if (!enabled) return;
+        originalPrompt = event.prompt;
     });
 
     pi.on("agent_start", async (_event, ctx) => {
