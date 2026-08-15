@@ -13,6 +13,12 @@ interface ModelsConfig {
     apiKey?: string;
     models?: Array<{
       id?: string;
+      thinkingLevelMap?: {
+        off?: string | null;
+      };
+      compat?: {
+        thinkingFormat?: string;
+      };
       samplingParams?: {
         chat_template_kwargs?: {
           preserve_thinking?: boolean;
@@ -37,7 +43,9 @@ async function qwenThinkingIsValid(): Promise<boolean> {
     (provider.models ?? []).filter((model) => model.id?.toLowerCase().includes("qwen3.8-27b"))
   );
   return qwenModels.length === 0 || qwenModels.every((model) =>
-    model.samplingParams?.chat_template_kwargs?.preserve_thinking === true
+    model.thinkingLevelMap?.off === "none"
+    && model.compat?.thinkingFormat === "qwen"
+    && model.samplingParams?.chat_template_kwargs?.preserve_thinking === true
   );
 }
 
@@ -130,7 +138,7 @@ export default function (pi: ExtensionAPI) {
 
       if (!(await qwenThinkingIsValid())) {
         syncing = false;
-        ctx.ui.notify("Model synchronization failed: Qwen3.8 preserve_thinking was not enabled", "error");
+        ctx.ui.notify("Model synchronization failed: Qwen3.8 thinking configuration is incomplete", "error");
         return;
       }
 

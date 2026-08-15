@@ -84,16 +84,23 @@ def make_entry(server_model: dict, old_by_id: dict[str, dict]) -> dict:
     if "qwen3.8-27b" in model_id.lower():
         entry["reasoning"] = True
         entry["thinkingLevelMap"] = {
-            "off": None,
+            "off": "none",
             "minimal": None,
             "low": "low",
             "medium": "medium",
             "high": None,
             "xhigh": "xhigh",
         }
-        entry["samplingParams"] = {
-            "chat_template_kwargs": {"preserve_thinking": True}
-        }
+        compat = dict(entry.get("compat") or {})
+        compat["thinkingFormat"] = "qwen"
+        entry["compat"] = compat
+        sampling_params = dict(entry.get("samplingParams") or {})
+        chat_template_kwargs = dict(
+            sampling_params.get("chat_template_kwargs") or {}
+        )
+        chat_template_kwargs["preserve_thinking"] = True
+        sampling_params["chat_template_kwargs"] = chat_template_kwargs
+        entry["samplingParams"] = sampling_params
     return entry
 
 
