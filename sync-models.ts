@@ -1,10 +1,34 @@
+import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-
+const HERE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), ".");
 const AGENT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const SYNC_SCRIPT = resolve(AGENT_DIR, "sync-models.py");
+const SYNC_SCRIPT = resolve(HERE_DIR, "sync-models.py");
 const MODELS_CONFIG = resolve(AGENT_DIR, "models.json");
+
+interface ModelsConfig {
+  providers?: Record<string, {
+    models?: Array<{
+      id?: string;
+      samplingParams?: {
+        chat_template_kwargs?: {
+          preserve_thinking?: boolean;
+        };
+      };
+    }>;
+  }>;
+}
+
+async function qwenPreservesThinking(): Promise<boolean> {
+  const config = JSON.parse(await readFile(MODELS_CONFIG, "utf8")) as ModelsConfig;
+  return Object.values(config.providers ?? {}).some((provider) =>
+    (provider.models ?? []).some((model) =>
+      model.id?.toLowerCase().includes("qwen3.8-27b")
+      && model.samplingParams?.chat_template_kwargs?.preserve_thinking === true
+    )
+  );
+}
 
 export default function (pi: ExtensionAPI) {
   let syncing = false;
@@ -50,6 +74,12 @@ export default function (pi: ExtensionAPI) {
         syncing = false;
         const error = result.stderr.trim() || result.stdout.trim() || `sync exited with code ${result.code}`;
         ctx.ui.notify(`Model synchronization failed: ${error}`, "error");
+        return;
+      }
+
+      if (!(await qwenPreservesThinking())) {
+        syncing = false;
+        ctx.ui.notify("Model synchronization failed: Qwen3.8 preserve_thinking was not enabled", "error");
         return;
       }
 
