@@ -9,6 +9,8 @@ const MODELS_CONFIG = resolve(AGENT_DIR, "models.json");
 
 interface ModelsConfig {
   providers?: Record<string, {
+    baseUrl?: string;
+    apiKey?: string;
     models?: Array<{
       id?: string;
       samplingParams?: {
@@ -20,13 +22,22 @@ interface ModelsConfig {
   }>;
 }
 
-async function qwenPreservesThinking(): Promise<boolean> {
-  const config = JSON.parse(await readFile(MODELS_CONFIG, "utf8")) as ModelsConfig;
-  return Object.values(config.providers ?? {}).some((provider) =>
-    (provider.models ?? []).some((model) =>
-      model.id?.toLowerCase().includes("qwen3.8-27b")
-      && model.samplingParams?.chat_template_kwargs?.preserve_thinking === true
-    )
+async function readModelsConfig(): Promise<ModelsConfig> {
+  try {
+    return JSON.parse(await readFile(MODELS_CONFIG, "utf8")) as ModelsConfig;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
+  }
+}
+
+async function qwenThinkingIsValid(): Promise<boolean> {
+  const config = await readModelsConfig();
+  const qwenModels = Object.values(config.providers ?? {}).flatMap((provider) =>
+    (provider.models ?? []).filter((model) => model.id?.toLowerCase().includes("qwen3.8-27b"))
+  );
+  return qwenModels.length === 0 || qwenModels.every((model) =>
+    model.samplingParams?.chat_template_kwargs?.preserve_thinking === true
   );
 }
 
@@ -52,10 +63,50 @@ export default function (pi: ExtensionAPI) {
       }
 
       syncing = true;
-      ctx.ui.notify("Synchronizing models…", "info");
-
       const scriptArgs = [SYNC_SCRIPT, "--config", MODELS_CONFIG];
       if (argument === "all") scriptArgs.push("--include-all");
+
+      try {
+        const config = await readModelsConfig();
+        const providers = Object.entries(config.providers ?? {});
+        if (providers.length > 1) {
+          throw new Error("models.json must contain at most one provider");
+        }
+
+        const promptRequired = async (title: string, placeholder: string): Promise<string> => {
+          const value = (await ctx.ui.input(title, placeholder))?.trim();
+          if (!value) throw new Error("Setup cancelled");
+          return value;
+        };
+
+        if (providers.length === 0) {
+          const providerName = await promptRequired("Provider name", "thread");
+          scriptArgs.push("--provider-name", providerName);
+        }
+
+        const provider = providers[0]?.[1];
+        if (!provider?.baseUrl) {
+          const ip = await promptRequired("Server IP or hostname", "192.168.1.10");
+          const port = await promptRequired("Server port", "8888");
+          const portNumber = Number(port);
+          if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+            throw new Error("Server port must be between 1 and 65535");
+          }
+          scriptArgs.push("--ip", ip, "--port", String(portNumber));
+        }
+
+        if (!provider?.apiKey) {
+          const apiKey = await promptRequired("API key", "sk-...");
+          scriptArgs.push("--api-key", apiKey);
+        }
+      } catch (error) {
+        syncing = false;
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(message, message === "Setup cancelled" ? "warning" : "error");
+        return;
+      }
+
+      ctx.ui.notify("Synchronizing models…", "info");
 
       let result;
       try {
@@ -77,7 +128,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (!(await qwenPreservesThinking())) {
+      if (!(await qwenThinkingIsValid())) {
         syncing = false;
         ctx.ui.notify("Model synchronization failed: Qwen3.8 preserve_thinking was not enabled", "error");
         return;
