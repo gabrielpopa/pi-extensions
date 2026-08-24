@@ -11,6 +11,12 @@ The existing provider configuration is preserved. Existing model entries keep
 their Pi-specific metadata; new entries receive sensible defaults based on
 the server's /v1/models response. Missing configuration is created
 interactively.
+
+GGUF models with more than one downloaded quantization get one entry per
+quant, addressed as "<model id>:<quant>" (e.g.
+"unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL"). With Studio's OpenAI auto-switch
+enabled, requesting such an id loads/switches to that quantization.
+Models with a single quant keep their plain id.
 """
 
 from __future__ import annotations
@@ -19,11 +25,12 @@ import argparse
 import getpass
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
@@ -68,9 +75,56 @@ def context_window(model: dict) -> int:
     return DEFAULT_CONTEXT
 
 
-def make_entry(server_model: dict, old_by_id: dict[str, dict]) -> dict:
-    model_id = server_model["id"]
-    old = old_by_id.get(model_id, {})
+def fetch_quant_variants(base_url: str, api_key: str, model_id: str) -> list[str]:
+    """Return the downloaded GGUF quantizations for a model repo (best effort).
+
+    Uses Studio's /api/models/gguf-variants endpoint, which lives on the server
+    root rather than under the /v1 base path. Returns [] when the endpoint is
+    unavailable or the repo has no variant list.
+    """
+    parts = urlsplit(base_url.rstrip("/"))
+    root = urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+    url = f"{root}/api/models/gguf-variants?repo_id={quote(model_id, safe='')}"
+    request = Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    try:
+        with urlopen(request, timeout=15) as response:
+            payload = json.load(response)
+    except (HTTPError, URLError, json.JSONDecodeError):
+        return []
+    variants = payload.get("variants") if isinstance(payload, dict) else None
+    if not isinstance(variants, list):
+        return []
+    quants: list[str] = []
+    for variant in variants:
+        if not isinstance(variant, dict) or not variant.get("downloaded"):
+            continue
+        quant = variant.get("quant")
+        if isinstance(quant, str) and quant not in quants:
+            quants.append(quant)
+    return quants
+
+
+def derive_name(model_id: str) -> str:
+    name = model_id.split("/")[-1]
+    if name.upper().endswith("-GGUF"):
+        name = name[: -len("-GGUF")]
+    return name.replace("-", " ")
+
+
+def make_entry(
+    model_id: str,
+    old_by_id: dict[str, dict],
+    server_model: dict | None = None,
+    base_model_id: str | None = None,
+    quant: str | None = None,
+) -> dict:
+    # Inherit metadata from an entry with the exact id first, then from the
+    # base model entry (so plain-id config carries over to quant-suffixed ids).
+    old = old_by_id.get(model_id)
+    if old is None and base_model_id:
+        old = old_by_id.get(base_model_id)
+    old = dict(old or {})
+    server_model = server_model or {}
     entry = dict(old)
     entry["id"] = model_id
     entry.setdefault("reasoning", False)
@@ -101,6 +155,11 @@ def make_entry(server_model: dict, old_by_id: dict[str, dict]) -> dict:
         chat_template_kwargs["preserve_thinking"] = True
         sampling_params["chat_template_kwargs"] = chat_template_kwargs
         entry["samplingParams"] = sampling_params
+    if quant:
+        base_name = old.get("name") or derive_name(base_model_id or model_id)
+        # Drop any stale "(quant)" suffix left over from a previous sync.
+        base_name = re.sub(r"\s*\([^)]*\)$", "", str(base_name)).strip()
+        entry["name"] = f"{base_name} ({quant})"
     return entry
 
 
@@ -226,7 +285,33 @@ def main() -> int:
             for model in old_models
             if isinstance(model, dict) and model.get("id")
         }
-        provider["models"] = [make_entry(model, old_by_id) for model in server_models]
+
+        entries: list[dict] = []
+        for model in server_models:
+            model_id = model["id"]
+            quants: list[str] = []
+            if isinstance(model_id, str) and model_id.upper().endswith("-GGUF"):
+                quants = fetch_quant_variants(base_url, api_key, model_id)
+                loaded = model.get("quant")
+                # Keep the currently loaded quant first so the default
+                # position matches what the server has in memory.
+                if isinstance(loaded, str) and loaded in quants:
+                    quants.remove(loaded)
+                    quants.insert(0, loaded)
+            if len(quants) > 1:
+                for quant in quants:
+                    entries.append(
+                        make_entry(
+                            f"{model_id}:{quant}",
+                            old_by_id,
+                            model,
+                            base_model_id=model_id,
+                            quant=quant,
+                        )
+                    )
+            else:
+                entries.append(make_entry(model_id, old_by_id, model))
+        provider["models"] = entries
         write_json_atomically(args.config, config)
 
         print(f"Synchronized {len(provider['models'])} models in {args.config}")

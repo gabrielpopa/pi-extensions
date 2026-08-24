@@ -53,7 +53,7 @@ export default function (pi: ExtensionAPI) {
   let syncing = false;
 
   pi.registerCommand("sync-models", {
-    description: "Pull the latest server models into models.json and reload Pi",
+    description: "Pull the latest server models (one entry per downloaded GGUF quantization) into models.json and reload Pi",
     getArgumentCompletions: (prefix) => {
       const option = { value: "all", label: "all", description: "Include embedding models" };
       return option.value.startsWith(prefix.trim().toLowerCase()) ? [option] : null;
