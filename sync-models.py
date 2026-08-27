@@ -78,13 +78,19 @@ def context_window(model: dict) -> int:
 def fetch_quant_variants(base_url: str, api_key: str, model_id: str) -> list[str]:
     """Return the downloaded GGUF quantizations for a model repo (best effort).
 
-    Uses Studio's /api/models/gguf-variants endpoint, which lives on the server
-    root rather than under the /v1 base path. Returns [] when the endpoint is
+    Uses Studio's /api/models/gguf-variants endpoint with
+    prefer_local_cache=true: the network-resolved listing reports multi-part GGUF
+    repos (e.g. Qwen3.8-Flash-Next) as never downloaded even with every shard on
+    disk, and this flag answers from the local cache instead. The endpoint lives
+    on the server root rather than under the /v1 base path. Returns [] when it is
     unavailable or the repo has no variant list.
     """
     parts = urlsplit(base_url.rstrip("/"))
     root = urlunsplit((parts.scheme, parts.netloc, "", "", ""))
-    url = f"{root}/api/models/gguf-variants?repo_id={quote(model_id, safe='')}"
+    url = (
+        f"{root}/api/models/gguf-variants"
+        f"?repo_id={quote(model_id, safe='')}&prefer_local_cache=true"
+    )
     request = Request(url, headers={"Authorization": f"Bearer {api_key}"})
     try:
         with urlopen(request, timeout=15) as response:
@@ -135,14 +141,14 @@ def make_entry(
         "cost",
         {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
     )
-    if "qwen3.8-27b" in model_id.lower():
+    if "qwen3.8" in model_id.lower():
         entry["reasoning"] = True
         entry["thinkingLevelMap"] = {
             "off": "none",
-            "minimal": None,
+            "minimal": "minimal",
             "low": "low",
             "medium": "medium",
-            "high": None,
+            "high": "high",
             "xhigh": "xhigh",
         }
         compat = dict(entry.get("compat") or {})

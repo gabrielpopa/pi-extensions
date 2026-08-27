@@ -40,7 +40,7 @@ async function readModelsConfig(): Promise<ModelsConfig> {
 async function qwenThinkingIsValid(): Promise<boolean> {
   const config = await readModelsConfig();
   const qwenModels = Object.values(config.providers ?? {}).flatMap((provider) =>
-    (provider.models ?? []).filter((model) => model.id?.toLowerCase().includes("qwen3.8-27b"))
+    (provider.models ?? []).filter((model) => model.id?.toLowerCase().includes("qwen3.8"))
   );
   return qwenModels.length === 0 || qwenModels.every((model) =>
     model.thinkingLevelMap?.off === "none"
