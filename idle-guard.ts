@@ -19,8 +19,8 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-const DEFAULT_PREFILL_THRESHOLD_MS = 120_000; // 2 minutes for initial context processing
-const DEFAULT_STREAM_THRESHOLD_MS = 45_000;   // 45 seconds once tokens are flowing
+const DEFAULT_PREFILL_THRESHOLD_MS = 300_000; // 5 minutes for initial context processing
+const DEFAULT_STREAM_THRESHOLD_MS = 90_000;   // 90 seconds once tokens are flowing
 const MIN_PREFILL_SEC = 30;
 const MAX_PREFILL_SEC = 600;
 const MIN_STREAM_SEC = 10;
@@ -39,7 +39,6 @@ export default function (pi: ExtensionAPI) {
     let firstTokenReceived = false;
     let currentCtx: ExtensionContext | null = null;
     let retryCount = 0;
-    let originalPrompt: string | null = null;
     let isRetrySend = false;
     const MAX_RETRIES = 3;
 
@@ -78,7 +77,7 @@ export default function (pi: ExtensionAPI) {
 
                 const silenceSeconds = (silenceMs / 1000).toFixed(0);
 
-                if (retryCount < MAX_RETRIES && originalPrompt) {
+                if (retryCount < MAX_RETRIES) {
                     retryCount++;
                     console.error(`[idle-guard] Stream idle for ${silenceSeconds}s (${phase}) — retry ${retryCount}/${MAX_RETRIES}`);
 
@@ -92,7 +91,7 @@ export default function (pi: ExtensionAPI) {
                     ctx.abort();
                     isRetrySend = true;
                     setTimeout(() => {
-                        pi.sendUserMessage(originalPrompt!);
+                        pi.sendUserMessage("continue");
                     }, 500);
                 } else {
                     console.error(`[idle-guard] Stream idle for ${silenceSeconds}s (${phase}) — aborting after ${retryCount} retries`);
@@ -115,11 +114,6 @@ export default function (pi: ExtensionAPI) {
             "idle-guard",
             ctx.ui.theme.fg("dim", `Idle guard: on`)
         );
-    });
-
-    pi.on("before_agent_start", async (event, _ctx) => {
-        if (!enabled) return;
-        originalPrompt = event.prompt;
     });
 
     pi.on("agent_start", async (_event, ctx) => {
