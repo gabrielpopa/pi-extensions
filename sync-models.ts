@@ -13,6 +13,7 @@ interface ModelsConfig {
     apiKey?: string;
     models?: Array<{
       id?: string;
+      name?: string;
       thinkingLevelMap?: {
         off?: string | null;
       };
@@ -37,6 +38,40 @@ async function readModelsConfig(): Promise<ModelsConfig> {
   }
 }
 
+interface ServerModel {
+  id: string;
+  quant?: string;
+  loaded?: boolean;
+}
+
+async function fetchLoadedName(): Promise<string | null> {
+  const config = await readModelsConfig();
+  const providers = Object.entries(config.providers ?? {});
+  // Prefer the provider pi is currently using, fall back to the first one.
+  const provider = providers.find(([name]) => name === process.env.PI_PROVIDER)?.[1] ?? providers[0]?.[1];
+  if (!provider) throw new Error("no providers in models.json");
+  if (!provider?.baseUrl) throw new Error("provider has no baseUrl");
+
+  let resp: Response;
+  try {
+    resp = await fetch(provider.baseUrl.replace(/\/$/, "") + "/models", {
+      headers: { Authorization: `Bearer ${provider.apiKey ?? ""}` },
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (error) {
+    throw new Error(`cannot reach ${provider.baseUrl}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!resp.ok) throw new Error(`server returned HTTP ${resp.status}`);
+
+  const payload = (await resp.json()) as { data?: ServerModel[] };
+  const loaded = (payload.data ?? []).find((model) => model.loaded);
+  if (!loaded) return null; // nothing in memory — legitimately empty
+
+  const id = loaded.quant ? `${loaded.id}:${loaded.quant}` : loaded.id;
+  const entry = (provider.models ?? []).find((model) => model.id === id);
+  return entry?.name ?? id;
+}
+
 async function qwenThinkingIsValid(): Promise<boolean> {
   const config = await readModelsConfig();
   const qwenModels = Object.values(config.providers ?? {}).flatMap((provider) =>
@@ -51,6 +86,19 @@ async function qwenThinkingIsValid(): Promise<boolean> {
 
 export default function (pi: ExtensionAPI) {
   let syncing = false;
+
+  pi.registerCommand("model-loaded", {
+    description: "Show which model is loaded in server memory",
+    handler: async (_args, ctx) => {
+      try {
+        const name = await fetchLoadedName();
+        if (name) ctx.ui.notify(`Loaded model: ${name}`, "info");
+        else ctx.ui.notify("No model loaded on server", "warning");
+      } catch (error) {
+        ctx.ui.notify(`Loaded model: unavailable (${error instanceof Error ? error.message : String(error)})`, "error");
+      }
+    },
+  });
 
   pi.registerCommand("sync-models", {
     description: "Pull the latest server models (one entry per downloaded GGUF quantization) into models.json and reload Pi",
