@@ -5,12 +5,13 @@
  * Fetches data from the local GPU dashboard API.
  *
  * Features:
- * - Compact footer summary by default
- * - /gpu-toggle switches to detailed per-GPU footer view
+ * - Compact footer summary
+ * - /gpu-status shows a detailed per-GPU table in the main window
  * - gpu_status tool callable by the LLM
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { matchesKey, visibleWidth, type Focusable } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 interface GPUData {
@@ -55,13 +56,36 @@ function compactGPUName(name: string | null): string {
 
 function colorUtil(utilPct: number | null, theme?: ExtensionContext["ui"]["theme"]): string {
   if (utilPct == null) return "--";
-  const str = `${utilPct}%`;
+  const str = `${utilPct}`;
   return utilPct > 0 && theme ? theme.fg("success", str) : str;
+}
+
+// Threshold colors: >=40 uses the theme's success tint (same as GPU util),
+// higher tiers use fixed ANSI 256 (theme palette has no orange).
+function colorTemp(temp: number | null, theme?: ExtensionContext["ui"]["theme"]): string {
+  if (temp == null) return "--";
+  const text = `${temp}`;
+  if (temp >= 70) return `\x1b[38;5;196m${text}\x1b[39m`;
+  if (temp >= 60) return `\x1b[38;5;208m${text}\x1b[39m`;
+  if (temp >= 40) return theme ? theme.fg("success", text) : `\x1b[38;5;226m${text}\x1b[39m`;
+  // Soft muted green (#5faf5f), easy on the eyes
+  return `\x1b[38;5;64m${text}\x1b[39m`;
+}
+
+// VRAM usage tiers: >=90 red, >=80 orange, >=10 yellow, >=1 green, 0 normal.
+function colorVramPct(pct: number, theme?: ExtensionContext["ui"]["theme"]): string {
+  const text = `${pct}`;
+  // Theme error red is softer and adapts to dark/light (#cc6666 / #aa5555)
+  if (pct >= 90) return theme ? theme.fg("error", text) : `\x1b[38;5;196m${text}\x1b[39m`;
+  if (pct >= 80) return `\x1b[38;5;208m${text}\x1b[39m`;
+  if (pct >= 10) return theme ? theme.fg("success", text) : `\x1b[38;5;226m${text}\x1b[39m`;
+  if (pct >= 1) return `\x1b[38;5;64m${text}\x1b[39m`;
+  return text;
 }
 
 function formatGPU(gpu: GPUData, theme?: ExtensionContext["ui"]["theme"]): string {
   const name = compactGPUName(gpu.name);
-  const temp = gpu["temperature.gpu"] != null ? `${gpu["temperature.gpu"]}°C` : "--";
+  const temp = colorTemp(gpu["temperature.gpu"], theme);
   const util = colorUtil(gpu["utilization.gpu"], theme);
   const power = gpu["power.draw"] != null ? `${Math.round(gpu["power.draw"])}W` : "--";
   const fan = gpu["fan.speed"] != null ? `${gpu["fan.speed"]}%` : "--";
@@ -71,16 +95,77 @@ function formatGPU(gpu: GPUData, theme?: ExtensionContext["ui"]["theme"]): strin
     const used = (gpu["memory.used"] / 1024).toFixed(1);
     const total = (gpu["memory.total"] / 1024).toFixed(1);
     const pct = ((gpu["memory.used"] / gpu["memory.total"]) * 100).toFixed(0);
-    vram = `${used}/${total} ${makeBar(Number(pct))} ${pct}%`;
+    vram = `${used} ${total} ${makeBar(Number(pct))} ${colorVramPct(Number(pct), theme)}`;
   }
 
   return `${name} ${temp} ${util} ${vram} ${power} Fan:${fan}`;
 }
 
+function buildGpuTable(gpus: GPUData[]): string {
+  const headers = ["GPU", "Temp", "Util", "VRAM", "Use", "Power", "Fan"];
+  const rows = gpus.map((g) => {
+    let vram = "--";
+    let use = "--";
+    if (g["memory.used"] != null && g["memory.total"] != null && g["memory.total"] > 0) {
+      vram = `${(g["memory.used"] / 1024).toFixed(1)}/${(g["memory.total"] / 1024).toFixed(1)}G`;
+      use = `${((g["memory.used"] / g["memory.total"]) * 100).toFixed(0)}%`;
+    }
+    return [
+      g.name ?? "?",
+      g["temperature.gpu"] != null ? `${g["temperature.gpu"]}°C` : "--",
+      g["utilization.gpu"] != null ? `${g["utilization.gpu"]}%` : "--",
+      vram,
+      use,
+      g["power.draw"] != null ? `${Math.round(g["power.draw"])}W` : "--",
+      g["fan.speed"] != null ? `${g["fan.speed"]}%` : "--",
+    ];
+  });
+
+  const widths = headers.map((h, i) => Math.max(visibleWidth(h), ...rows.map((r) => visibleWidth(r[i]))));
+  const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - visibleWidth(s)));
+  const fmt = (cells: string[]) => cells.map((c, i) => pad(c, widths[i])).join("  ");
+  const sep = widths.map((w) => "─".repeat(w)).join("──");
+
+  const inner = [fmt(headers), sep, ...rows.map(fmt)];
+  const w = Math.max(...inner.map((l) => visibleWidth(l)));
+  const box = (content: string) => `│ ${pad(content, w)} │`;
+
+  return [
+    `╭${"─".repeat(w + 2)}╮`,
+    box("GPU Status"),
+    box(""),
+    ...inner.map(box),
+    box(""),
+    box("esc to close"),
+    `╰${"─".repeat(w + 2)}╯`,
+  ].join("\n");
+}
+
+class GpuTableComponent implements Focusable {
+  focused = false;
+  private lines: string[];
+
+  constructor(text: string, private done: () => void) {
+    this.lines = text.split("\n");
+  }
+
+  handleInput(data: string): void {
+    if (matchesKey(data, "escape") || matchesKey(data, "return") || data === "q" || data === " ") {
+      this.done();
+    }
+  }
+
+  render(): string[] {
+    return this.lines;
+  }
+
+  invalidate(): void {}
+  dispose(): void {}
+}
+
 export default function (pi: ExtensionAPI) {
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
   const REFRESH_MS = 3000;
-  let detailedFooter = false; // compact by default, toggle to detailed
 
   function startRefresh(ctx: ExtensionContext) {
     if (refreshTimer) return;
@@ -100,31 +185,16 @@ export default function (pi: ExtensionAPI) {
       const gpus = await fetchGPUs();
       if (gpus.length === 0 || ctx.mode !== "tui") return;
 
-      if (detailedFooter) {
-        // Detailed: full per-GPU info in the footer
-        const lines: string[] = [];
-        for (const gpu of gpus) {
-          if (gpu.error) {
-            lines.push(`Error: ${gpu.error}`);
-          } else {
-            lines.push(formatGPU(gpu, ctx.ui.theme));
-          }
+      // Compact: single-line summary
+      const temps = gpus.map((g) => colorTemp(g["temperature.gpu"], ctx.ui.theme));
+      const utils = gpus.map((g) => colorUtil(g["utilization.gpu"], ctx.ui.theme));
+      const vrams = gpus.map((g) => {
+        if (g["memory.used"] != null && g["memory.total"] != null && g["memory.total"] > 0) {
+          return colorVramPct(Number(((g["memory.used"] / g["memory.total"]) * 100).toFixed(0)), ctx.ui.theme);
         }
-        ctx.ui.setStatus("gpu-status", lines.join(" ◆ "));
-      } else {
-        // Compact: single-line summary
-        const temps = gpus.map(
-          (g) => g["temperature.gpu"] != null ? `${g["temperature.gpu"]}°C` : "--",
-        );
-        const utils = gpus.map((g) => colorUtil(g["utilization.gpu"], ctx.ui.theme));
-        const vrams = gpus.map((g) => {
-          if (g["memory.used"] != null && g["memory.total"] != null && g["memory.total"] > 0) {
-            return `${((g["memory.used"] / g["memory.total"]) * 100).toFixed(0)}%`;
-          }
-          return "--";
-        });
-        ctx.ui.setStatus("gpu-status", `Temp: ${temps.join("/")}  GPU: ${utils.join("/")}  VRAM: ${vrams.join("/")}`);
-      }
+        return "--";
+      });
+      ctx.ui.setStatus("gpu-status", `°C: ${temps.join(" ")}  GPU: ${utils.join(" ")}  VRAM: ${vrams.join(" ")}`);
     } catch {
       // Silently swallow errors from stale context or UI failures.
     }
@@ -142,14 +212,20 @@ export default function (pi: ExtensionAPI) {
     stopRefresh();
   });
 
-  // ── /gpu-toggle command ──────────────────────────────────────────
+  // ── /gpu-status command (detailed table overlay) ─────────────────
 
-  pi.registerCommand("gpu-toggle", {
-    description: "Toggle GPU footer between compact and detailed view",
+  pi.registerCommand("gpu-status", {
+    description: "Show a detailed per-GPU table in the main window",
     handler: async (_args, ctx) => {
-      detailedFooter = !detailedFooter;
-      ctx.ui.notify(detailedFooter ? "GPU detailed" : "GPU compact", "info");
-      refreshGPUs(ctx);
+      const gpus = await fetchGPUs();
+      if (gpus.length === 0) {
+        ctx.ui.notify("GPU dashboard is unreachable or no GPUs found.", "error");
+        return;
+      }
+      await ctx.ui.custom(
+        (_tui, _theme, _keybindings, done) => new GpuTableComponent(buildGpuTable(gpus), () => done()),
+        { overlay: true },
+      );
     },
   });
 
