@@ -119,26 +119,42 @@ async function qwenThinkingIsValid(): Promise<boolean> {
   );
 }
 
+type NotifyContext = {
+  ui: {
+    notify: (message: string, kind?: "info" | "warning" | "error") => void;
+  };
+};
+
+async function showLoadedModel(ctx: NotifyContext): Promise<void> {
+  try {
+    const loaded = await fetchLoadedName();
+    if (loaded) {
+      const details = [
+        loaded.contextLength ? `max context ${loaded.contextLength}` : null,
+        loaded.hasVision === null ? null : loaded.hasVision ? "vision" : "text-only",
+      ].filter(Boolean).join(", ");
+      ctx.ui.notify(`Loaded model: ${loaded.name}${details ? ` (${details})` : ""}`, "info");
+    } else {
+      ctx.ui.notify("No model loaded on server", "warning");
+    }
+  } catch (error) {
+    ctx.ui.notify(`Loaded model: unavailable (${error instanceof Error ? error.message : String(error)})`, "error");
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   let syncing = false;
+
+  pi.on("session_start", (event, ctx) => {
+    if (event.reason !== "startup") return;
+    // Fire-and-forget so startup is not blocked by the server fetch.
+    void showLoadedModel(ctx);
+  });
 
   pi.registerCommand("model-loaded", {
     description: "Show which model is loaded in server memory",
     handler: async (_args, ctx) => {
-      try {
-        const loaded = await fetchLoadedName();
-        if (loaded) {
-          const details = [
-            loaded.contextLength ? `max context ${loaded.contextLength}` : null,
-            loaded.hasVision === null ? null : loaded.hasVision ? "vision" : "text-only",
-          ].filter(Boolean).join(", ");
-          ctx.ui.notify(`Loaded model: ${loaded.name}${details ? ` (${details})` : ""}`, "info");
-        } else {
-          ctx.ui.notify("No model loaded on server", "warning");
-        }
-      } catch (error) {
-        ctx.ui.notify(`Loaded model: unavailable (${error instanceof Error ? error.message : String(error)})`, "error");
-      }
+      await showLoadedModel(ctx);
     },
   });
 
