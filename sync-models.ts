@@ -42,9 +42,18 @@ interface ServerModel {
   id: string;
   quant?: string;
   loaded?: boolean;
+  context_length?: number;
+  max_context_length?: number;
+  native_context_length?: number;
 }
 
-async function fetchLoadedName(): Promise<string | null> {
+interface LoadedModelInfo {
+  name: string;
+  contextLength: number | null;
+  hasVision: boolean | null; // null = unknown
+}
+
+async function fetchLoadedName(): Promise<LoadedModelInfo | null> {
   const config = await readModelsConfig();
   const providers = Object.entries(config.providers ?? {});
   // Prefer the provider pi is currently using, fall back to the first one.
@@ -69,7 +78,33 @@ async function fetchLoadedName(): Promise<string | null> {
 
   const id = loaded.quant ? `${loaded.id}:${loaded.quant}` : loaded.id;
   const entry = (provider.models ?? []).find((model) => model.id === id);
-  return entry?.name ?? id;
+
+  let contextLength: number | null = null;
+  for (const field of ["max_context_length", "native_context_length", "context_length"]) {
+    const value = loaded[field];
+    if (typeof value === "number" && value > 0) {
+      contextLength = value;
+      break;
+    }
+  }
+
+  // Best effort: Studio's /api/models/list reports is_vision per model.
+  let hasVision: boolean | null = null;
+  try {
+    const base = new URL(provider.baseUrl);
+    const listResp = await fetch(`${base.protocol}//${base.host}/api/models/list`, {
+      headers: { Authorization: `Bearer ${provider.apiKey ?? ""}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (listResp.ok) {
+      const list = (await listResp.json()) as { models?: Array<{ id?: string; is_vision?: boolean }> };
+      hasVision = (list.models ?? []).find((model) => model.id === loaded.id)?.is_vision ?? null;
+    }
+  } catch {
+    // ignore — vision info is optional
+  }
+
+  return { name: entry?.name ?? id, contextLength, hasVision };
 }
 
 async function qwenThinkingIsValid(): Promise<boolean> {
@@ -91,9 +126,16 @@ export default function (pi: ExtensionAPI) {
     description: "Show which model is loaded in server memory",
     handler: async (_args, ctx) => {
       try {
-        const name = await fetchLoadedName();
-        if (name) ctx.ui.notify(`Loaded model: ${name}`, "info");
-        else ctx.ui.notify("No model loaded on server", "warning");
+        const loaded = await fetchLoadedName();
+        if (loaded) {
+          const details = [
+            loaded.contextLength ? `max context ${loaded.contextLength}` : null,
+            loaded.hasVision === null ? null : loaded.hasVision ? "vision" : "text-only",
+          ].filter(Boolean).join(", ");
+          ctx.ui.notify(`Loaded model: ${loaded.name}${details ? ` (${details})` : ""}`, "info");
+        } else {
+          ctx.ui.notify("No model loaded on server", "warning");
+        }
       } catch (error) {
         ctx.ui.notify(`Loaded model: unavailable (${error instanceof Error ? error.message : String(error)})`, "error");
       }
