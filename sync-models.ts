@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
 const HERE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), ".");
 const AGENT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SYNC_SCRIPT = resolve(HERE_DIR, "sync-models.py");
@@ -48,17 +48,23 @@ interface ServerModel {
 }
 
 interface LoadedModelInfo {
+  /** Provider key in models.json (needed to look the model up in the registry). */
+  provider: string;
+  /** Model id as registered in models.json (includes the quantization when present). */
+  modelId: string;
+  /** Model id as reported by the server, without quantization suffix. */
+  serverId: string;
   name: string;
   contextLength: number | null;
   hasVision: boolean | null; // null = unknown
 }
 
-async function fetchLoadedName(): Promise<LoadedModelInfo | null> {
+async function fetchLoadedModel(): Promise<LoadedModelInfo | null> {
   const config = await readModelsConfig();
   const providers = Object.entries(config.providers ?? {});
   // Prefer the provider pi is currently using, fall back to the first one.
-  const provider = providers.find(([name]) => name === process.env.PI_PROVIDER)?.[1] ?? providers[0]?.[1];
-  if (!provider) throw new Error("no providers in models.json");
+  const [providerName, provider] = providers.find(([name]) => name === process.env.PI_PROVIDER) ?? providers[0] ?? [];
+  if (!providerName || !provider) throw new Error("no providers in models.json");
   if (!provider?.baseUrl) throw new Error("provider has no baseUrl");
 
   let resp: Response;
@@ -77,10 +83,13 @@ async function fetchLoadedName(): Promise<LoadedModelInfo | null> {
   if (!loaded) return null; // nothing in memory — legitimately empty
 
   const id = loaded.quant ? `${loaded.id}:${loaded.quant}` : loaded.id;
-  const entry = (provider.models ?? []).find((model) => model.id === id);
+  const entry =
+    (provider.models ?? []).find((model) => model.id === id) ??
+    (provider.models ?? []).find((model) => model.id === loaded.id);
 
   let contextLength: number | null = null;
-  for (const field of ["max_context_length", "native_context_length", "context_length"]) {
+  const fields = ["max_context_length", "native_context_length", "context_length"] as const;
+  for (const field of fields) {
     const value = loaded[field];
     if (typeof value === "number" && value > 0) {
       contextLength = value;
@@ -104,7 +113,14 @@ async function fetchLoadedName(): Promise<LoadedModelInfo | null> {
     // ignore — vision info is optional
   }
 
-  return { name: entry?.name ?? id, contextLength, hasVision };
+  return {
+    provider: providerName,
+    modelId: entry?.id ?? id,
+    serverId: loaded.id,
+    name: entry?.name ?? entry?.id ?? id,
+    contextLength,
+    hasVision,
+  };
 }
 
 async function qwenThinkingIsValid(): Promise<boolean> {
@@ -119,26 +135,91 @@ async function qwenThinkingIsValid(): Promise<boolean> {
   );
 }
 
-type NotifyContext = {
-  ui: {
-    notify: (message: string, kind?: "info" | "warning" | "error") => void;
-  };
-};
+type PiModel = NonNullable<ReturnType<ModelRegistry["find"]>>;
 
-async function showLoadedModel(ctx: NotifyContext): Promise<void> {
+function normalize(value: string): string {
+  return value.toLowerCase();
+}
+
+/** Candidate ids for the loaded model: quantized id first, then the bare server id. */
+function candidateIds(loaded: LoadedModelInfo): string[] {
+  const candidates: string[] = [];
+  for (const id of [loaded.modelId, loaded.serverId]) {
+    if (!candidates.some((seen) => normalize(seen) === normalize(id))) candidates.push(id);
+  }
+  return candidates;
+}
+
+function isCurrentModel(model: PiModel | undefined, loaded: LoadedModelInfo): boolean {
+  if (!model || model.provider !== loaded.provider) return false;
+  const current = normalize(model.id);
+  return candidateIds(loaded).some((id) => normalize(id) === current);
+}
+
+function findRegistryModel(registry: ModelRegistry, loaded: LoadedModelInfo): PiModel | undefined {
+  for (const id of candidateIds(loaded)) {
+    const model = registry.find(loaded.provider, id);
+    if (model) return model;
+  }
+  // Fall back to a case-insensitive scan of the available catalogue.
+  const candidates = candidateIds(loaded).map(normalize);
+  return registry
+    .getAvailable()
+    .find((model) => model.provider === loaded.provider && candidates.includes(normalize(model.id)));
+}
+
+type LoadedReport = { loaded: LoadedModelInfo; label: string };
+
+async function describeLoadedModel(ctx: ExtensionContext): Promise<LoadedReport | null> {
+  let loaded: LoadedModelInfo | null;
   try {
-    const loaded = await fetchLoadedName();
-    if (loaded) {
-      const details = [
-        loaded.contextLength ? `max context ${loaded.contextLength}` : null,
-        loaded.hasVision === null ? null : loaded.hasVision ? "vision" : "text-only",
-      ].filter(Boolean).join(", ");
-      ctx.ui.notify(`Loaded model: ${loaded.name}${details ? ` (${details})` : ""}`, "info");
-    } else {
-      ctx.ui.notify("No model loaded on server", "warning");
-    }
+    loaded = await fetchLoadedModel();
   } catch (error) {
     ctx.ui.notify(`Loaded model: unavailable (${error instanceof Error ? error.message : String(error)})`, "error");
+    return null;
+  }
+  if (!loaded) {
+    ctx.ui.notify("No model loaded on server", "warning");
+    return null;
+  }
+  const details = [
+    loaded.contextLength ? `max context ${loaded.contextLength}` : null,
+    loaded.hasVision === null ? null : loaded.hasVision ? "vision" : "text-only",
+  ].filter(Boolean).join(", ");
+  return { loaded, label: `${loaded.name}${details ? ` (${details})` : ""}` };
+}
+
+async function showLoadedModel(ctx: ExtensionContext): Promise<void> {
+  const report = await describeLoadedModel(ctx);
+  if (report) ctx.ui.notify(`Loaded model: ${report.label}`, "info");
+}
+
+/** Switch the session to whichever model is currently resident in server memory. */
+async function useLoadedModel(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+  const report = await describeLoadedModel(ctx);
+  if (!report) return;
+  const { loaded, label } = report;
+
+  if (isCurrentModel(ctx.model, loaded)) {
+    ctx.ui.notify(`Loaded model: ${label} (already active)`, "info");
+    return;
+  }
+
+  const model = findRegistryModel(ctx.modelRegistry, loaded);
+  if (!model) {
+    ctx.ui.notify(`Loaded model: ${label} — no matching entry in models.json. Run /sync-models to add it`, "warning");
+    return;
+  }
+
+  if (ctx.scopedModels.length > 0 && !ctx.scopedModels.some((scoped) => scoped.model.id === model.id)) {
+    ctx.ui.notify(`Loaded model: ${label} is outside this session's model scope`, "warning");
+    return;
+  }
+
+  if (await pi.setModel(model)) {
+    ctx.ui.notify(`Switched to loaded model: ${label}`, "info");
+  } else {
+    ctx.ui.notify(`Cannot switch to ${label}: no credentials for provider "${model.provider}"`, "error");
   }
 }
 
@@ -148,13 +229,20 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (event, ctx) => {
     if (event.reason !== "startup") return;
     // Fire-and-forget so startup is not blocked by the server fetch.
-    void showLoadedModel(ctx);
+    void useLoadedModel(pi, ctx);
   });
 
   pi.registerCommand("model-loaded", {
-    description: "Show which model is loaded in server memory",
-    handler: async (_args, ctx) => {
-      await showLoadedModel(ctx);
+    description: 'Show which model is loaded in server memory ("use" switches to it)',
+    getArgumentCompletions: (prefix) => {
+      const option = { value: "use", label: "use", description: "Switch the session to the loaded model" };
+      return option.value.startsWith(prefix.trim().toLowerCase()) ? [option] : null;
+    },
+    handler: async (args, ctx) => {
+      const argument = args.trim().toLowerCase();
+      if (!argument) await showLoadedModel(ctx);
+      else if (argument === "use") await useLoadedModel(pi, ctx);
+      else ctx.ui.notify("Usage: /model-loaded [use]", "error");
     },
   });
 
