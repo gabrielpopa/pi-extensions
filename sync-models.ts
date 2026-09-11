@@ -88,7 +88,10 @@ async function fetchLoadedModel(): Promise<LoadedModelInfo | null> {
     (provider.models ?? []).find((model) => model.id === loaded.id);
 
   let contextLength: number | null = null;
-  const fields = ["max_context_length", "native_context_length", "context_length"] as const;
+  // On unsloth-studio, `context_length` is the context actually allocated in memory;
+  // `max_context_length` mirrors the active --reasoning-budget (set via /reasoning-budget apply),
+  // and `native_context_length` is the GGUF-trained max. None of those are the loaded context.
+  const fields = ["context_length", "max_context_length", "native_context_length"] as const;
   for (const field of fields) {
     const value = loaded[field];
     if (typeof value === "number" && value > 0) {
@@ -183,7 +186,7 @@ async function describeLoadedModel(ctx: ExtensionContext): Promise<LoadedReport 
     return null;
   }
   const details = [
-    loaded.contextLength ? `max context ${loaded.contextLength}` : null,
+    loaded.contextLength ? `context ${loaded.contextLength}` : null,
     loaded.hasVision === null ? null : loaded.hasVision ? "vision" : "text-only",
   ].filter(Boolean).join(", ");
   return { loaded, label: `${loaded.name}${details ? ` (${details})` : ""}` };
