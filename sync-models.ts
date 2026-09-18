@@ -40,6 +40,8 @@ async function readModelsConfig(): Promise<ModelsConfig> {
 
 interface ServerModel {
   id: string;
+  /** Non-chat models are tagged (e.g. "text-to-image"); chat models omit this. */
+  task?: string | null;
   quant?: string;
   loaded?: boolean;
   context_length?: number;
@@ -79,7 +81,8 @@ async function fetchLoadedModel(): Promise<LoadedModelInfo | null> {
   if (!resp.ok) throw new Error(`server returned HTTP ${resp.status}`);
 
   const payload = (await resp.json()) as { data?: ServerModel[] };
-  const loaded = (payload.data ?? []).find((model) => model.loaded);
+  const chatTasks = new Set([undefined, null, "text-generation", "chat", "completion"]);
+  const loaded = (payload.data ?? []).find((model) => model.loaded && chatTasks.has(model.task));
   if (!loaded) return null; // nothing in memory — legitimately empty
 
   const id = loaded.quant ? `${loaded.id}:${loaded.quant}` : loaded.id;
@@ -340,9 +343,11 @@ export default function (pi: ExtensionAPI) {
       }
 
       syncing = false;
-      const firstLine = result.stdout.trim().split("\n")[0];
-      ctx.ui.notify(firstLine || "Models synchronized; reloading Pi", "info");
-      await ctx.reload();
+      const [header, ...modelIds] = result.stdout.trim().split("\n").map((line) => line.trim());
+      const question = `Reload Pi now to apply?`;
+      const body = [header, "", ...modelIds].join("\n");
+      if (await ctx.ui.confirm("Models synchronized", `${body}\n\n${question}`)) await ctx.reload();
+      else ctx.ui.notify("Reload cancelled — new models will apply on next restart", "info");
       return;
     },
   });

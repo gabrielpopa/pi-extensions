@@ -59,6 +59,15 @@ def fetch_models(base_url: str, api_key: str) -> list[dict]:
     return [model for model in models if isinstance(model, dict) and model.get("id")]
 
 
+# Studio tags non-LLM models with a `task` field (e.g. Z-Image-Turbo-GGUF is
+# "text-to-image"); chat models have no task or a plain text-generation one.
+CHAT_TASKS = {None, "text-generation", "chat", "completion"}
+
+
+def is_non_chat(model: dict) -> bool:
+    return model.get("task") not in CHAT_TASKS
+
+
 def is_embedding(model: dict) -> bool:
     haystack = " ".join(
         str(model.get(field, "")) for field in ("id", "display_name", "owned_by")
@@ -280,6 +289,7 @@ def main() -> int:
         write_json_atomically(args.config, config)
 
         server_models = fetch_models(base_url, api_key)
+        server_models = [model for model in server_models if not is_non_chat(model)]
         if not args.include_all:
             server_models = [model for model in server_models if not is_embedding(model)]
         if not server_models:
