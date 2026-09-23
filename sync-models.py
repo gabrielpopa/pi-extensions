@@ -126,12 +126,26 @@ def derive_name(model_id: str) -> str:
     return name.replace("-", " ")
 
 
+def loaded_context(model: dict) -> int | None:
+    """Context actually allocated in memory for a loaded model, if any.
+
+    Studio reports this as `context_length` on /models — the real allocation,
+    unlike `max_context_length` (mirrors --reasoning-budget) and
+    `native_context_length` (GGUF-trained max).
+    """
+    if not model.get("loaded"):
+        return None
+    value = model.get("context_length")
+    return value if isinstance(value, int) and value > 0 else None
+
+
 def make_entry(
     model_id: str,
     old_by_id: dict[str, dict],
     server_model: dict | None = None,
     base_model_id: str | None = None,
     quant: str | None = None,
+    loaded_context: int | None = None,
 ) -> dict:
     # Inherit metadata from an entry with the exact id first, then from the
     # base model entry (so plain-id config carries over to quant-suffixed ids).
@@ -175,6 +189,9 @@ def make_entry(
         # Drop any stale "(quant)" suffix left over from a previous sync.
         base_name = re.sub(r"\s*\([^)]*\)$", "", str(base_name)).strip()
         entry["name"] = f"{base_name} ({quant})"
+    if loaded_context is not None:
+        # The loaded model's real allocation wins over inherited/derived values.
+        entry["contextWindow"] = loaded_context
     return entry
 
 
@@ -314,6 +331,7 @@ def main() -> int:
                 if isinstance(loaded, str) and loaded in quants:
                     quants.remove(loaded)
                     quants.insert(0, loaded)
+            allocated = loaded_context(model)
             if len(quants) > 1:
                 for quant in quants:
                     entries.append(
@@ -323,10 +341,16 @@ def main() -> int:
                             model,
                             base_model_id=model_id,
                             quant=quant,
+                            # Only the loaded quant has a known real allocation.
+                            loaded_context=allocated
+                            if quant == model.get("quant")
+                            else None,
                         )
                     )
             else:
-                entries.append(make_entry(model_id, old_by_id, model))
+                entries.append(
+                    make_entry(model_id, old_by_id, model, loaded_context=allocated)
+                )
         provider["models"] = entries
         write_json_atomically(args.config, config)
 
