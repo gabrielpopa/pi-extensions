@@ -194,7 +194,7 @@ export default function (pi: ExtensionAPI) {
         }
         return "--";
       });
-      ctx.ui.setStatus("gpu-status", `°C: ${temps.join(" ")}  GPU: ${utils.join(" ")}  VRAM: ${vrams.join(" ")}`);
+      ctx.ui.setStatus("1-gpu-status", `°C: ${temps.join(" ")}  GPU: ${utils.join(" ")}  VRAM: ${vrams.join(" ")}`);
     } catch {
       // Silently swallow errors from stale context or UI failures.
     }

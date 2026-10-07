@@ -111,7 +111,7 @@ export default function (pi: ExtensionAPI) {
 
     pi.on("session_start", async (_event, ctx) => {
         ctx.ui.setStatus(
-            "idle-guard",
+            "9-idle-guard",
             ctx.ui.theme.fg("dim", `Idle guard: on`)
         );
     });
@@ -190,7 +190,7 @@ export default function (pi: ExtensionAPI) {
             }
 
             ctx.ui.setStatus(
-                "idle-guard",
+                "9-idle-guard",
                 ctx.ui.theme.fg("dim", `Idle guard: ${enabled ? "on" : "off"}`)
             );
             ctx.ui.notify(

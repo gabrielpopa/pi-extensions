@@ -597,7 +597,7 @@ export default function docsRag(pi: ExtensionAPI) {
   function updateStatus(ctx: ExtensionContext) {
     if (!ctx.hasUI) return;
     const n = index?.docs.length ?? 0;
-    ctx.ui.setStatus("docs-rag", n > 0 ? `📚 ${n} docs` : undefined);
+    ctx.ui.setStatus("3-docs-rag", n > 0 ? `📚 ${n} docs` : undefined);
   }
 
   // --- interactive removal (picker + confirm) --------------------------------
@@ -753,7 +753,7 @@ Do not call this tool more than 3 times per question.`,
         ctx.ui.notify("Usage: /learn <path-to-markdown-file-or-directory> [more paths...]", "warning");
         return;
       }
-      ctx.ui.setStatus("docs-rag", "learning…");
+      ctx.ui.setStatus("3-docs-rag", "learning…");
       const { learned, skipped } = await learnPaths(inputs);
       await loadOrBuildIndex(true);
       updateStatus(ctx);
