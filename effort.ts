@@ -9,6 +9,9 @@ const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const sat
 const EXTENSION_AGENT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const AGENT_DIR = resolve(process.env.PI_CODING_AGENT_DIR ?? EXTENSION_AGENT_DIR);
 const BUDGET_STORE_PATH = resolve(AGENT_DIR, "reasoning-budgets.json");
+const LAST_EFFORT_PATH = resolve(AGENT_DIR, "last-effort.txt");
+const PERSIST_LEVELS: readonly string[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const FALLBACK_EFFORT = "medium";
 const REASONING_BUDGET_FLAG = "--reasoning-budget";
 
 interface BudgetStore {
@@ -71,6 +74,21 @@ function usage(current: ThinkingLevel): string {
 
 function modelKey(ctx: ExtensionContext): string | undefined {
   return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+}
+
+async function readLastEffort(): Promise<string | undefined> {
+  try {
+    const raw = (await readFile(LAST_EFFORT_PATH, "utf8")).trim().toLowerCase();
+    return PERSIST_LEVELS.includes(raw) ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeLastEffort(level: string): Promise<void> {
+  if (!PERSIST_LEVELS.includes(level)) return;
+  await mkdir(AGENT_DIR, { recursive: true });
+  await writeFile(LAST_EFFORT_PATH, `${level}\n`);
 }
 
 async function loadBudgetStore(): Promise<BudgetStore> {
@@ -235,7 +253,21 @@ export default function effortExtension(pi: ExtensionAPI) {
     }
   };
 
-  pi.on("session_start", async (_event, ctx) => notifyMissingBudget(ctx));
+  pi.on("session_start", async (event, ctx) => {
+    if (event.reason === "startup") {
+      const level = (await readLastEffort()) ?? FALLBACK_EFFORT;
+      if (level !== pi.getThinkingLevel()) {
+        pi.setThinkingLevel(level as ReturnType<typeof pi.getThinkingLevel>);
+      }
+    }
+    await notifyMissingBudget(ctx);
+  });
+
+  // Only persist user-chosen levels; skip non-reasoning models so their forced "off" cannot stick.
+  pi.on("thinking_level_select", async (event, ctx) => {
+    if (ctx.model && ctx.model.reasoning === false) return;
+    await writeLastEffort(event.level);
+  });
   pi.on("model_select", async (_event, ctx) => notifyMissingBudget(ctx));
 
   pi.registerCommand("effort", {
