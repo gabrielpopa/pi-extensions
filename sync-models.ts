@@ -61,13 +61,20 @@ interface LoadedModelInfo {
   hasVision: boolean | null; // null = unknown
 }
 
-async function fetchLoadedModel(): Promise<LoadedModelInfo | null> {
-  const config = await readModelsConfig();
+type ProviderConfig = NonNullable<ModelsConfig["providers"]>[string];
+
+/** Providers to try, current pi provider first, then the rest in config order. */
+function providerOrder(config: ModelsConfig): Array<[string, ProviderConfig]> {
   const providers = Object.entries(config.providers ?? {});
-  // Prefer the provider pi is currently using, fall back to the first one.
-  const [providerName, provider] = providers.find(([name]) => name === process.env.PI_PROVIDER) ?? providers[0] ?? [];
-  if (!providerName || !provider) throw new Error("no providers in models.json");
-  if (!provider?.baseUrl) throw new Error("provider has no baseUrl");
+  const current = process.env.PI_PROVIDER;
+  return [
+    ...providers.filter(([name]) => name === current),
+    ...providers.filter(([name]) => name !== current),
+  ];
+}
+
+async function fetchLoadedFromProvider(providerName: string, provider: ProviderConfig): Promise<LoadedModelInfo | null> {
+  if (!provider.baseUrl) throw new Error("provider has no baseUrl");
 
   let resp: Response;
   try {
@@ -82,7 +89,12 @@ async function fetchLoadedModel(): Promise<LoadedModelInfo | null> {
 
   const payload = (await resp.json()) as { data?: ServerModel[] };
   const chatTasks = new Set([undefined, null, "text-generation", "chat", "completion"]);
-  const loaded = (payload.data ?? []).find((model) => model.loaded && chatTasks.has(model.task));
+  const chat = (payload.data ?? []).filter((model) => chatTasks.has(model.task));
+  // Studio flags residency with `loaded`; llama.cpp-style servers omit the field and list
+  // only what is in memory, so for those the first chat model is the loaded one.
+  const loaded = chat.some((model) => model.loaded !== undefined)
+    ? chat.find((model) => model.loaded)
+    : chat[0];
   if (!loaded) return null; // nothing in memory — legitimately empty
 
   const id = loaded.quant ? `${loaded.id}:${loaded.quant}` : loaded.id;
@@ -127,6 +139,25 @@ async function fetchLoadedModel(): Promise<LoadedModelInfo | null> {
     contextLength,
     hasVision,
   };
+}
+
+/** Try every provider until one reports a model in memory; unreachable ones are skipped. */
+async function fetchLoadedModel(): Promise<LoadedModelInfo | null> {
+  const providers = providerOrder(await readModelsConfig());
+  if (providers.length === 0) throw new Error("no providers in models.json");
+
+  const failures: string[] = [];
+  for (const [providerName, provider] of providers) {
+    try {
+      const loaded = await fetchLoadedFromProvider(providerName, provider);
+      if (loaded) return loaded;
+    } catch (error) {
+      failures.push(`${providerName}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  // A dead provider must not masquerade as "nothing loaded anywhere".
+  if (failures.length > 0) throw new Error(failures.join(" | "));
+  return null;
 }
 
 async function qwenThinkingIsValid(): Promise<boolean> {
@@ -217,7 +248,7 @@ async function useLoadedModel(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
     return;
   }
 
-  if (ctx.scopedModels.length > 0 && !ctx.scopedModels.some((scoped) => scoped.model.id === model.id)) {
+  if (ctx.scopedModels.length > 0 && !ctx.scopedModels.some((scoped) => scoped.model.id === model.id && scoped.model.provider === model.provider)) {
     ctx.ui.notify(`Loaded model: ${label} is outside this session's model scope`, "warning");
     return;
   }
@@ -271,41 +302,35 @@ export default function (pi: ExtensionAPI) {
       }
 
       syncing = true;
-      const scriptArgs = [SYNC_SCRIPT, "--config", MODELS_CONFIG];
-      if (argument === "all") scriptArgs.push("--include-all");
+      const commonArgs = argument === "all" ? ["--include-all"] : [];
 
+      let runs: Array<{ name: string; args: string[] }>;
       try {
-        const config = await readModelsConfig();
-        const providers = Object.entries(config.providers ?? {});
-        if (providers.length > 1) {
-          throw new Error("models.json must contain at most one provider");
-        }
-
         const promptRequired = async (title: string, placeholder: string): Promise<string> => {
           const value = (await ctx.ui.input(title, placeholder))?.trim();
           if (!value) throw new Error("Setup cancelled");
           return value;
         };
 
-        if (providers.length === 0) {
-          const providerName = await promptRequired("Provider name", "thread");
-          scriptArgs.push("--provider-name", providerName);
-        }
+        const config = await readModelsConfig();
+        const providers: Array<[string, ProviderConfig | undefined]> = Object.entries(config.providers ?? {});
+        // A config with no providers yet gets one prompted provider.
+        if (providers.length === 0) providers.push([await promptRequired("Provider name", "thread"), undefined]);
 
-        const provider = providers[0]?.[1];
-        if (!provider?.baseUrl) {
-          const ip = await promptRequired("Server IP or hostname", "192.168.1.10");
-          const port = await promptRequired("Server port", "8888");
-          const portNumber = Number(port);
-          if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
-            throw new Error("Server port must be between 1 and 65535");
+        runs = [];
+        for (const [name, provider] of providers) {
+          const args = [...commonArgs, "--provider-name", name];
+          if (!provider?.baseUrl) {
+            const ip = await promptRequired(`Server IP or hostname (${name})`, "192.168.1.10");
+            const port = await promptRequired(`Server port (${name})`, "8888");
+            const portNumber = Number(port);
+            if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+              throw new Error("Server port must be between 1 and 65535");
+            }
+            args.push("--ip", ip, "--port", String(portNumber));
           }
-          scriptArgs.push("--ip", ip, "--port", String(portNumber));
-        }
-
-        if (!provider?.apiKey) {
-          const apiKey = await promptRequired("API key", "sk-...");
-          scriptArgs.push("--api-key", apiKey);
+          if (!provider?.apiKey) args.push("--api-key", await promptRequired(`API key (${name})`, "sk-..."));
+          runs.push({ name, args });
         }
       } catch (error) {
         syncing = false;
@@ -316,23 +341,28 @@ export default function (pi: ExtensionAPI) {
 
       ctx.ui.notify("Synchronizing models…", "info");
 
-      let result;
-      try {
-        result = await pi.exec("python3", scriptArgs, {
-          cwd: AGENT_DIR,
-          timeout: 30_000,
-        });
-      } catch (error) {
-        syncing = false;
-        const message = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(`Model synchronization failed: ${message}`, "error");
-        return;
+      // One subprocess per provider: a dead server only costs its own provider.
+      const synced: string[] = [];
+      const failed: string[] = [];
+      for (const run of runs) {
+        try {
+          const result = await pi.exec("python3", [SYNC_SCRIPT, "--config", MODELS_CONFIG, ...run.args], {
+            cwd: AGENT_DIR,
+            timeout: 30_000,
+          });
+          if (result.code === 0) {
+            synced.push(result.stdout.trim());
+          } else {
+            failed.push(`${run.name}: ${result.stderr.trim() || result.stdout.trim() || `sync exited with code ${result.code}`}`);
+          }
+        } catch (error) {
+          failed.push(`${run.name}: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
 
-      if (result.code !== 0) {
+      if (synced.length === 0) {
         syncing = false;
-        const error = result.stderr.trim() || result.stdout.trim() || `sync exited with code ${result.code}`;
-        ctx.ui.notify(`Model synchronization failed: ${error}`, "error");
+        ctx.ui.notify(`Model synchronization failed: ${failed.join(" | ")}`, "error");
         return;
       }
 
@@ -343,9 +373,8 @@ export default function (pi: ExtensionAPI) {
       }
 
       syncing = false;
-      const [header, ...modelIds] = result.stdout.trim().split("\n").map((line) => line.trim());
       const question = `Reload Pi now to apply?`;
-      const body = [header, "", ...modelIds].join("\n");
+      const body = [...synced, ...failed.map((line) => `Skipped ${line}`)].join("\n\n");
       if (await ctx.ui.confirm("Models synchronized", `${body}\n\n${question}`)) await ctx.reload();
       else ctx.ui.notify("Reload cancelled — new models will apply on next restart", "info");
       return;

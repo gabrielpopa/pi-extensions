@@ -6,8 +6,11 @@ Usage:
     .pi/agent/extensions/sync-models.py --include-all
     .pi/agent/extensions/sync-models.py --api-key KEY --ip 192.168.1.10 --port 8888
     .pi/agent/extensions/sync-models.py --config /path/to/models.json
+    .pi/agent/extensions/sync-models.py --provider-name thread
 
-The existing provider configuration is preserved. Existing model entries keep
+The existing provider configuration is preserved. Only the provider selected by
+--provider-name is synchronized (the single provider when there is only one);
+other providers in models.json are left untouched. Existing model entries keep
 their Pi-specific metadata; new entries receive sensible defaults based on
 the server's /v1/models response. Missing configuration is created
 interactively.
@@ -238,11 +241,21 @@ def configure_provider(config: dict, args: argparse.Namespace) -> tuple[str, dic
     if not isinstance(providers, dict):
         raise RuntimeError("models config 'providers' must be an object")
 
-    if len(providers) > 1:
-        raise RuntimeError("expected at most one provider in the config")
-
     if providers:
-        provider_name, provider = next(iter(providers.items()))
+        if args.provider_name:
+            provider_name = args.provider_name
+            provider = providers.get(provider_name)
+            if provider is None:
+                raise RuntimeError(
+                    f"provider '{provider_name}' not found; known providers: {', '.join(providers)}"
+                )
+        elif len(providers) == 1:
+            provider_name, provider = next(iter(providers.items()))
+        else:
+            raise RuntimeError(
+                "models config has several providers, pass --provider-name one of: "
+                f"{', '.join(providers)}"
+            )
         if not isinstance(provider, dict):
             raise RuntimeError(f"provider '{provider_name}' must be an object")
     else:
@@ -292,7 +305,10 @@ def main() -> int:
     parser.add_argument("--api-key", help="override the API key from models.json")
     parser.add_argument("--ip", help="override the Unsloth server IP/hostname")
     parser.add_argument("--port", type=int, help="override the Unsloth server port")
-    parser.add_argument("--provider-name", help="provider name when creating models.json")
+    parser.add_argument(
+        "--provider-name",
+        help="provider to sync (required when models.json has several providers)",
+    )
     parser.add_argument(
         "--include-all",
         action="store_true",
