@@ -7,9 +7,13 @@
  * Features:
  * - Compact footer summary
  * - /gpu-status shows a detailed per-GPU table in the main window
+ * - /gpu-server lists, adds, switches and removes dashboard servers (multiple supported)
  * - gpu_status tool callable by the LLM
  */
 
+import { readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, visibleWidth, type Focusable } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -30,16 +34,57 @@ interface GPUData {
   error?: string;
 }
 
-const DASHBOARD_URL = process.env.PI_GPU_DASHBOARD_URL ?? "http://192.168.1.10:8181";
+// Server list lives next to the other agent config so it survives restarts and is shared
+// by the footer, /gpu-status and the gpu_status tool.
+const CONFIG_PATH = join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi/agent"), "gpu-servers.json");
 
-async function fetchGPUs(): Promise<GPUData[]> {
+interface Server {
+  name: string;
+  url: string;
+}
+
+interface Config {
+  servers: Server[];
+  active: string;
+}
+
+// Accepts "192.168.1.42:8181" or "http://host:8181/" and always yields a base URL.
+function normalizeUrl(raw: string): string {
+  const url = raw.trim().replace(/\/+$/, "");
+  return /^https?:\/\//.test(url) ? url : `http://${url}`;
+}
+
+function loadConfig(): Config {
   try {
-    const resp = await fetch(`${DASHBOARD_URL}/api/gpu?sid=gpu-ext`, { signal: AbortSignal.timeout(5000) });
+    const cfg = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Config;
+    if (Array.isArray(cfg.servers) && cfg.servers.length > 0) return cfg;
+  } catch {
+    // missing or corrupt file falls through to the seed below
+  }
+  const url = normalizeUrl(process.env.PI_GPU_DASHBOARD_URL ?? "http://192.168.1.10:8181");
+  return { servers: [{ name: "default", url }], active: "default" };
+}
+
+function saveConfig(cfg: Config): void {
+  writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
+}
+
+function activeServer(cfg: Config): Server {
+  return cfg.servers.find((s) => s.name === cfg.active) ?? cfg.servers[0];
+}
+
+async function fetchFrom(url: string): Promise<GPUData[]> {
+  try {
+    const resp = await fetch(`${url}/api/gpu?sid=gpu-ext`, { signal: AbortSignal.timeout(5000) });
     if (!resp.ok) return [];
     return (await resp.json()) as GPUData[];
   } catch {
     return [];
   }
+}
+
+async function fetchGPUs(): Promise<GPUData[]> {
+  return fetchFrom(activeServer(loadConfig()).url);
 }
 
 function makeBar(percent: number, width: number = 10): string {
@@ -226,6 +271,78 @@ export default function (pi: ExtensionAPI) {
         (_tui, _theme, _keybindings, done) => new GpuTableComponent(buildGpuTable(gpus), () => done()),
         { overlay: true },
       );
+    },
+  });
+
+  // ── /gpu-server command (server registry) ────────────────────────
+
+  pi.registerCommand("gpu-server", {
+    description: "Switch, add, or remove GPU dashboard servers (bare command = switch)",
+    getArgumentCompletions: (prefix) => {
+      const subs = ["add", "use", "remove"].filter((s) => s.startsWith(prefix));
+      return subs.length > 0 ? subs.map((s) => ({ value: s, label: s })) : null;
+    },
+    handler: async (args, ctx) => {
+      const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+      const cfg = loadConfig();
+      const label = (s: Server) => `${s.name === cfg.active ? "●" : " "} ${s.name}  ${s.url}`;
+      const pick = async (title: string) => {
+        const items = cfg.servers.map(label);
+        const picked = await ctx.ui.select(title, items);
+        return picked ? cfg.servers[items.indexOf(picked)] : undefined;
+      };
+
+      const switchTo = async (server: Server) => {
+        cfg.active = server.name;
+        saveConfig(cfg);
+        const gpus = await fetchFrom(server.url);
+        ctx.ui.notify(
+          gpus.length > 0
+            ? `${server.name} (${server.url}) — ${gpus.length} GPU(s)`
+            : `${server.name} (${server.url}) is unreachable`,
+          gpus.length > 0 ? "info" : "error",
+        );
+        refreshGPUs(ctx);
+      };
+
+      switch (sub) {
+        case undefined:
+        case "use": {
+          const server = rest[0] ? cfg.servers.find((s) => s.name === rest[0]) : await pick("GPU dashboard servers");
+          if (server) await switchTo(server);
+          return;
+        }
+
+        case "add": {
+          const name = rest[0] || (await ctx.ui.input("Server name", "e.g. rig2"));
+          const raw = rest[1] || (await ctx.ui.input(`URL for ${name}`, "http://192.168.1.42:8181"));
+          if (!name || !raw) return;
+          const url = normalizeUrl(raw);
+          const existing = cfg.servers.find((s) => s.name === name);
+          if (existing) existing.url = url;
+          else cfg.servers.push({ name, url });
+          await switchTo(existing ?? cfg.servers[cfg.servers.length - 1]);
+          return;
+        }
+
+        case "remove": {
+          if (cfg.servers.length < 2) {
+            ctx.ui.notify("Keep at least one server configured.", "error");
+            return;
+          }
+          const server = await pick("Remove GPU dashboard");
+          if (!server) return;
+          cfg.servers = cfg.servers.filter((s) => s.name !== server.name);
+          if (cfg.active === server.name) cfg.active = cfg.servers[0].name;
+          saveConfig(cfg);
+          ctx.ui.notify(`Removed ${server.name}. Active: ${cfg.active}`, "info");
+          refreshGPUs(ctx);
+          return;
+        }
+
+        default:
+          ctx.ui.notify("Usage: /gpu-server [use <name> | add <name> <url> | remove <name>]", "info");
+      }
     },
   });
 
