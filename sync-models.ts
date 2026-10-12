@@ -336,23 +336,13 @@ async function showLoadedModel(ctx: ExtensionContext): Promise<void> {
 }
 
 /** Switch the session to whichever model is currently resident in server memory. */
-async function useLoadedModel(
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
-  interactive = true,
-): Promise<void> {
+async function useLoadedModel(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
   const reports = await describeLoadedModels(ctx);
   if (reports.length === 0) return;
 
   const alreadyActive = reports.find((report) => isCurrentModel(ctx.model, report.loaded));
   if (alreadyActive) {
     ctx.ui.notify(`Loaded model: ${alreadyActive.label} (already active)`, "info");
-    return;
-  }
-
-  // Several servers loaded: ask which one, except at startup where a dialog is intrusive.
-  if (reports.length > 1 && !interactive) {
-    await showLoadedModel(ctx);
     return;
   }
 
@@ -510,7 +500,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (event, ctx) => {
     if (event.reason !== "startup") return;
     // Fire-and-forget so startup is not blocked by the server fetch.
-    void useLoadedModel(pi, ctx, false);
+    // When several models are resident this prompts to pick one.
+    void useLoadedModel(pi, ctx);
   });
 
   pi.registerCommand("model-loaded", {
