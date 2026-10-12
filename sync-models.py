@@ -6,7 +6,7 @@ Usage:
     .pi/agent/extensions/sync-models.py --include-all
     .pi/agent/extensions/sync-models.py --api-key KEY --ip 192.168.1.10 --port 8888
     .pi/agent/extensions/sync-models.py --config /path/to/models.json
-    .pi/agent/extensions/sync-models.py --provider-name thread
+    .pi/agent/extensions/sync-models.py --provider-name llama
 
 The existing provider configuration is preserved. Only the provider selected by
 --provider-name is synchronized (the single provider when there is only one);
