@@ -167,6 +167,8 @@ def make_entry(
         "cost",
         {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
     )
+    if "glm" in model_id.lower():
+        entry["reasoning"] = True
     if "qwen3.8" in model_id.lower():
         entry["reasoning"] = True
         entry["thinkingLevelMap"] = {
@@ -263,7 +265,7 @@ def configure_provider(config: dict, args: argparse.Namespace) -> tuple[str, dic
         provider = {
             "api": "openai-completions",
             "compat": {
-                "supportsDeveloperRole": False,
+                "supportsDeveloperRole": True,
                 "supportsReasoningEffort": True,
             },
             "models": [],

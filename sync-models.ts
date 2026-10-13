@@ -435,7 +435,7 @@ export default function (pi: ExtensionAPI) {
         api: "openai-completions",
         baseUrl,
         apiKey,
-        compat: { supportsDeveloperRole: false, supportsReasoningEffort: true },
+        compat: { supportsDeveloperRole: true, supportsReasoningEffort: true },
         models: [],
       };
       await writeRawConfig(config);
