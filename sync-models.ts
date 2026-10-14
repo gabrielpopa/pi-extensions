@@ -399,7 +399,8 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const lines = entries.map(
-      ([name, provider]) => `${name} — ${provider.baseUrl ?? "no baseUrl"} (${(provider.models ?? []).length} models)`,
+      ([name, provider], index) =>
+        `${index + 1}. ${name} — ${provider.baseUrl ?? "no baseUrl"} (${(provider.models ?? []).length} models)`,
     );
     ctx.ui.notify(`Providers:\n${lines.join("\n")}`, "info");
   }
@@ -443,6 +444,50 @@ export default function (pi: ExtensionAPI) {
       if (!(await syncOne(providerName, ctx))) {
         ctx.ui.notify(`Provider "${providerName}" is in models.json with no models yet`, "warning");
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.ui.notify(message, message === "Setup cancelled" ? "warning" : "error");
+    }
+  }
+
+  async function moveProvider(ctx: ExtensionCommandContext, name?: string, positionArg?: string): Promise<void> {
+    const config = await readRawConfig();
+    const providers = config.providers ?? {};
+    const names = Object.keys(providers);
+    if (names.length === 0) {
+      ctx.ui.notify("No providers in models.json — use /provider add", "warning");
+      return;
+    }
+
+    try {
+      let providerName = name && providers[name] ? name : undefined;
+      if (!providerName) {
+        providerName = await ctx.ui.select("Move which provider?", names);
+        if (!providerName) {
+          ctx.ui.notify("Move cancelled", "warning");
+          return;
+        }
+      }
+
+      const from = names.indexOf(providerName);
+      const positionText = positionArg?.trim() ||
+        (await promptRequired(ctx, `New position for "${providerName}" (1-${names.length}, currently ${from + 1})`, "1"));
+      const position = Number(positionText);
+      if (!Number.isInteger(position) || position < 1 || position > names.length) {
+        ctx.ui.notify(`Position must be a whole number between 1 and ${names.length}`, "error");
+        return;
+      }
+
+      if (position === from + 1) {
+        ctx.ui.notify(`Provider "${providerName}" is already at position ${position}`, "info");
+        return;
+      }
+
+      names.splice(from, 1);
+      names.splice(position - 1, 0, providerName);
+      config.providers = Object.fromEntries(names.map((n) => [n, providers[n]]));
+      await writeRawConfig(config);
+      ctx.ui.notify(`Provider "${providerName}" moved to position ${position}`, "info");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       ctx.ui.notify(message, message === "Setup cancelled" ? "warning" : "error");
@@ -530,6 +575,7 @@ export default function (pi: ExtensionAPI) {
       }
       const options = [
         { value: "add", label: "add", description: "Add a new provider" },
+        { value: "move", label: "move", description: "Move a provider's position in the list" },
         ...names.map((name) => ({ value: `edit ${name}`, label: `edit ${name}`, description: `Edit "${name}"` })),
       ];
       const matches = options.filter((option) => option.value.startsWith(text));
@@ -539,8 +585,9 @@ export default function (pi: ExtensionAPI) {
       const [subcommand = "list", ...rest] = args.trim().split(/\s+/);
       if (subcommand === "list") await listProviders(ctx);
       else if (subcommand === "add") await addProvider(pi, ctx, rest[0]);
+      else if (subcommand === "move") await moveProvider(ctx, rest[0], rest[1]);
       else if (subcommand === "edit") await editProvider(pi, ctx, rest[0]);
-      else ctx.ui.notify("Usage: /provider [list | add [name] | edit [name]]", "error");
+      else ctx.ui.notify("Usage: /provider [list | add [name] | edit [name] | move [name] [position]]", "error");
     },
   });
 
