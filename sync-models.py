@@ -169,6 +169,15 @@ def make_entry(
     )
     if "glm" in model_id.lower():
         entry["reasoning"] = True
+        entry["thinkingLevelMap"] = {
+            "off": "none",
+            "minimal": "low",
+            "low": "low",
+            "medium": "low",
+            "high": "high",
+            "xhigh": "high",
+            "max": "max",
+        }
     if "qwen3.8" in model_id.lower():
         entry["reasoning"] = True
         entry["thinkingLevelMap"] = {
