@@ -129,8 +129,6 @@ export default function (pi: ExtensionAPI) {
         // First token delta means prefill is done
         if (!firstTokenReceived) {
             firstTokenReceived = true;
-            const prefillMs = Date.now() - turnStartTime;
-            console.log(`[idle-guard] Prefill done in ${(prefillMs / 1000).toFixed(1)}s`);
         }
     });
 

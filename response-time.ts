@@ -1,8 +1,7 @@
 /**
  * Response Time Extension
  *
- * Appends the elapsed time (from user input to end of agent output) and the
- * streaming throughput (output tokens/s, prefill excluded) to the session footer.
+ * Appends elapsed time plus output and prefill throughput (tokens/s) to the footer.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -11,6 +10,9 @@ export default function (pi: ExtensionAPI) {
 	let firstTokenTime: number | undefined;
 	let streamMs = 0;
 	let outputTokens = 0;
+	let prefillMs = 0;
+	let inputTokens = 0;
+	let lastAssistantEnd: number | undefined;
 
 	pi.on("session_start", async (_event, ctx) => {
 		ctx.ui.setStatus("2-response-time", "");
@@ -20,6 +22,9 @@ export default function (pi: ExtensionAPI) {
 		turnStartTime = Date.now();
 		streamMs = 0;
 		outputTokens = 0;
+		prefillMs = 0;
+		inputTokens = 0;
+		lastAssistantEnd = undefined;
 		firstTokenTime = undefined;
 	});
 
@@ -37,7 +42,13 @@ export default function (pi: ExtensionAPI) {
 	pi.on("message_end", async (event, _ctx) => {
 		if (event.message.role !== "assistant") return;
 		outputTokens += event.message.usage?.output ?? 0;
-		if (firstTokenTime != null) streamMs += Date.now() - firstTokenTime;
+		inputTokens += event.message.usage?.input ?? 0;
+		const now = Date.now();
+		if (firstTokenTime != null) {
+			prefillMs += firstTokenTime - (lastAssistantEnd ?? turnStartTime ?? now);
+			streamMs += now - firstTokenTime;
+		}
+		lastAssistantEnd = now;
 		firstTokenTime = undefined;
 	});
 
@@ -63,7 +74,23 @@ export default function (pi: ExtensionAPI) {
 		if (streamMs > 0 && outputTokens > 0) {
 			const tps = outputTokens / (streamMs / 1000);
 			text += theme.fg("dim", ` · ${tps.toFixed(1)} t/s`);
+			if (prefillMs > 0 && inputTokens > 0)
+				text += theme.fg(
+					"dim",
+					` · pre ${(inputTokens / (prefillMs / 1000)).toFixed(0)} t/s`,
+				);
 		}
+		console.log(
+			`[response-time] ${label} · ${
+				streamMs > 0 && outputTokens > 0
+					? `${(outputTokens / (streamMs / 1000)).toFixed(1)} t/s`
+					: "n/a"
+			}${
+				prefillMs > 0 && inputTokens > 0
+					? ` · prefill ${(inputTokens / (prefillMs / 1000)).toFixed(0)} t/s`
+					: ""
+			}`,
+		);
 		ctx.ui.setStatus("2-response-time", icon + text);
 	});
 
